@@ -176,10 +176,6 @@ interface BookDao {
     @Query("UPDATE books SET origin = :newUrl WHERE origin = :oldUrl")
     fun updateBookSourceUrl(oldUrl: String, newUrl: String)
 
-    // 书源换域名时，将书籍 tocUrl 中的旧域名替换为新域名（不涉及主键）
-    @Query("UPDATE books SET tocUrl = REPLACE(tocUrl, :oldUrl, :newUrl) WHERE origin = :oldUrl")
-    fun replaceTocUrls(oldUrl: String, newUrl: String)
-
     // 书源换域名时，将书籍 bookUrl/tocUrl 中的旧域名替换为新域名
     // 用 substr 前缀替换 + CASE WHEN 保护 null tocUrl，避免 REPLACE 误替换域名内嵌子串
     // 返回受影响的行数，用于迁移日志
