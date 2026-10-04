@@ -16,3 +16,7 @@ package-lock.json
 .idea/
 # Kotlin 2.0
 .kotlin/
+
+# 签名文件防泄漏:正式/CI/临时 keystore 一律不入库(项目专用开发签名 keystore/legado-dev.jks 除外,必须保持被跟踪)
+app/key.jks
+app/legado.jks

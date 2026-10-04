@@ -1,0 +1,16 @@
+# 项目专用开发签名配置示例(完整说明见 keystore/README.md)
+#
+# 用法:把需要的配置复制到 用户级 gradle.properties
+#   Windows: C:\Users\<你>\.gradle\gradle.properties
+#   Linux/macOS: ~/.gradle/gradle.properties
+# 或以同名环境变量 / 命令行 -P 提供。
+# 真实密码由开发者自行妥善保存,严禁提交仓库、写入文档或源码。
+
+# 必填:开发签名密码(keystore/legado-dev.jks)。丢失后该 keystore 无法恢复,只能重新生成签名并重装 App。
+# DEV_STORE_PASSWORD=
+
+# 可选:keystore 文件路径,默认使用仓库内 keystore/legado-dev.jks(一般无需修改)
+# DEV_STORE_FILE=
+
+# 可选:key alias,默认 legado-dev
+# DEV_KEY_ALIAS=

@@ -30,6 +30,27 @@ try {
     // git not available during IDE sync, use default value 0
 }
 
+// 项目专用开发签名(keystore/legado-dev.jks)的密码解析:
+// 必须通过用户级 gradle.properties 或环境变量提供,详见 keystore/README.md 与 gradle.properties.example。
+// debug 构建缺失配置时直接报错,禁止回退到机器默认的 ~/.android/debug.keystore。
+def devStorePassword = { ->
+    def v = providers.gradleProperty("DEV_STORE_PASSWORD")
+            .orElse(providers.environmentVariable("DEV_STORE_PASSWORD")).orNull
+    if (v == null) {
+        def requestedTasks = gradle.startParameter.taskNames.join(" ")
+        if (requestedTasks =~ /(?i)debug/) {
+            throw new GradleException(
+                "缺少开发签名密码 DEV_STORE_PASSWORD(配置于用户级 ~/.gradle/gradle.properties 或同名环境变量)," +
+                        "详见 keystore/README.md。本项目 debug 构建固定使用 keystore/legado-dev.jks," +
+                        "禁止回退到机器默认 debug.keystore。"
+            )
+        }
+        // 非 debug 构建(如 CI 的 assembleAppRelease)不会使用 devConfig,占位值仅为通过配置阶段
+        v = "dev-signing-not-used"
+    }
+    v
+}
+
 android {
     compileSdk = compile_sdk_version
     buildToolsVersion = "36.1.0"
@@ -52,6 +73,19 @@ android {
                 enableV3Signing = true
                 enableV4Signing = true
             }
+        }
+        // 项目专用开发签名:仅用于 debug 开发包,与 release 签名(GitHub Secrets)、
+        // CI 测试签名(.github/workflows/legado.jks)完全分离,文件随仓库分发。
+        devConfig {
+            storeFile rootProject.file(
+                    providers.gradleProperty("DEV_STORE_FILE").orElse("keystore/legado-dev.jks").get()
+            )
+            storePassword devStorePassword()
+            keyAlias providers.gradleProperty("DEV_KEY_ALIAS").orElse("legado-dev").get()
+            keyPassword storePassword
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
         }
     }
     defaultConfig {
@@ -97,9 +131,8 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro', 'cronet-proguard-rules.pro'
         }
         debug {
-            if (project.hasProperty("RELEASE_STORE_FILE")) {
-                signingConfig signingConfigs.myConfig
-            }
+            // 开发 APK 固定使用项目专用签名,禁止回退到机器默认 debug.keystore
+            signingConfig signingConfigs.devConfig
             manifestPlaceholders.put("app_name", "@string/app_name")
 
             applicationIdSuffix '.debug'
