@@ -5,6 +5,7 @@ object EventBus {
     const val RECREATE = "RECREATE"
     const val UP_BOOKSHELF = "upBookToc"
     const val BOOKSHELF_REFRESH = "bookshelfRefresh"
+    const val BOOKSHELF_FILTER_CHANGED = "bookshelfFilterChanged"
     const val ALOUD_STATE = "aloud_state"
     const val TTS_PROGRESS = "ttsStart"
     const val AUDIO_DS = "audioDs"

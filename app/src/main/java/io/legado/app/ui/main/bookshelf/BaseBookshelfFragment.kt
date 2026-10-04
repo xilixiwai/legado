@@ -16,8 +16,10 @@ import io.legado.app.data.entities.BookGroup
 import io.legado.app.databinding.DialogBookshelfConfigBinding
 import io.legado.app.databinding.DialogEditTextBinding
 import io.legado.app.help.DirectLinkUpload
+import io.legado.app.help.book.BookshelfFilter
 import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.dialogs.alert
+import io.legado.app.lib.dialogs.selector
 import io.legado.app.ui.about.AppLogDialog
 import io.legado.app.ui.book.cache.CacheActivity
 import io.legado.app.ui.book.group.GroupManageDialog
@@ -86,6 +88,22 @@ abstract class BaseBookshelfFragment(layoutId: Int) : VMBaseFragment<BookshelfVi
 
     abstract fun gotoTop()
 
+    /**
+     * 书架高级筛选:只改变展示条件,不修改任何书籍数据
+     */
+    private fun showBookshelfFilter() {
+        val filters = BookshelfFilter.entries
+        requireContext().selector(
+            getString(R.string.filter),
+            filters.map { getString(it.titleRes) }
+        ) { _, index ->
+            if (AppConfig.bookshelfFilter != index) {
+                AppConfig.bookshelfFilter = index
+                postEvent(EventBus.BOOKSHELF_FILTER_CHANGED, "")
+            }
+        }
+    }
+
     override fun onCompatCreateOptionsMenu(menu: Menu) {
         menuInflater.inflate(R.menu.main_bookshelf, menu)
     }
@@ -95,6 +113,7 @@ abstract class BaseBookshelfFragment(layoutId: Int) : VMBaseFragment<BookshelfVi
         when (item.itemId) {
             R.id.menu_remote -> startActivity<RemoteBookActivity>()
             R.id.menu_search -> startActivity<SearchActivity>()
+            R.id.menu_filter -> showBookshelfFilter()
             R.id.menu_update_toc -> activityViewModel.upToc(books)
             R.id.menu_bookshelf_layout -> configBookshelf()
             R.id.menu_group_manage -> showDialogFragment<GroupManageDialog>()

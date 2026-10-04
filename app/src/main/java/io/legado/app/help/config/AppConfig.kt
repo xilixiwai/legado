@@ -542,6 +542,13 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
             appCtx.putPrefInt(PreferKey.bookshelfSort, value)
         }
 
+    /** 书架高级筛选(BookshelfFilter 的 ordinal,0=全部) */
+    var bookshelfFilter: Int
+        get() = appCtx.getPrefInt(PreferKey.bookshelfFilter, 0)
+        set(value) {
+            appCtx.putPrefInt(PreferKey.bookshelfFilter, value)
+        }
+
     fun getBookSortByGroupId(groupId: Long): Int {
         return appDb.bookGroupDao.getByID(groupId)?.getRealBookSort()
             ?: bookshelfSort

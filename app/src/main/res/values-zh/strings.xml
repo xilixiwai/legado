@@ -62,6 +62,13 @@
     <string name="layout_grid5">网格五列</string>
     <string name="layout_grid6">网格六列</string>
     <string name="bookshelf_layout">书架布局</string>
+    <string name="filter">筛选</string>
+    <string name="filter_all">全部</string>
+    <string name="filter_unread">未读</string>
+    <string name="filter_reading">阅读中</string>
+    <string name="filter_finished">已读完</string>
+    <string name="filter_recent_read">最近阅读(7 天内)</string>
+    <string name="filter_recent_updated">最近更新(7 天内)</string>
     <string name="view">视图</string>
     <string name="book_library">书城</string>
     <string name="book_local">添加本地</string>

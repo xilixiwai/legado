@@ -18,6 +18,8 @@ import io.legado.app.data.appDb
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookGroup
 import io.legado.app.databinding.FragmentBookshelf2Binding
+import io.legado.app.help.book.BookshelfFilter
+import io.legado.app.help.book.filterBooks
 import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.theme.accentColor
 import io.legado.app.lib.theme.primaryColor
@@ -143,25 +145,30 @@ class BookshelfFragment2() : BaseBookshelfFragment(R.layout.fragment_bookshelf2)
         booksFlowJob?.cancel()
         booksFlowJob = viewLifecycleOwner.lifecycleScope.launch {
             appDb.bookDao.flowByGroup(groupId).map { list ->
+                //筛选(纯展示条件,只读既有字段,不修改数据)
+                val filtered = filterBooks(
+                    list,
+                    BookshelfFilter.fromOrdinal(AppConfig.bookshelfFilter)
+                )
                 //排序
                 when (AppConfig.getBookSortByGroupId(groupId)) {
-                    1 -> list.sortedByDescending {
+                    1 -> filtered.sortedByDescending {
                         it.latestChapterTime
                     }
 
-                    2 -> list.sortedWith { o1, o2 ->
+                    2 -> filtered.sortedWith { o1, o2 ->
                         o1.name.cnCompare(o2.name)
                     }
 
-                    3 -> list.sortedBy {
+                    3 -> filtered.sortedBy {
                         it.order
                     }
 
-                    4 -> list.sortedByDescending {
+                    4 -> filtered.sortedByDescending {
                         max(it.latestChapterTime, it.durChapterTime)
                     }
 
-                    else -> list.sortedByDescending {
+                    else -> filtered.sortedByDescending {
                         it.durChapterTime
                     }
                 }
@@ -253,6 +260,9 @@ class BookshelfFragment2() : BaseBookshelfFragment(R.layout.fragment_bookshelf2)
         super.observeLiveBus()
         observeEvent<String>(EventBus.UP_BOOKSHELF) {
             booksAdapter.notification(it)
+        }
+        observeEvent<String>(EventBus.BOOKSHELF_FILTER_CHANGED) {
+            initBooksData()
         }
         observeEvent<String>(EventBus.BOOKSHELF_REFRESH) {
             booksAdapter.notifyDataSetChanged()

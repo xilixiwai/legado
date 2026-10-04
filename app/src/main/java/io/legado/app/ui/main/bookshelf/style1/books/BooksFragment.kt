@@ -22,6 +22,8 @@ import io.legado.app.data.appDb
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookGroup
 import io.legado.app.databinding.FragmentBooksBinding
+import io.legado.app.help.book.BookshelfFilter
+import io.legado.app.help.book.filterBooks
 import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.theme.accentColor
 import io.legado.app.lib.theme.primaryColor
@@ -163,25 +165,30 @@ class BooksFragment() : BaseFragment(R.layout.fragment_books),
         booksFlowJob?.cancel()
         booksFlowJob = viewLifecycleOwner.lifecycleScope.launch {
             appDb.bookDao.flowByGroup(groupId).map { list ->
+                //筛选(纯展示条件,只读既有字段,不修改数据)
+                val filtered = filterBooks(
+                    list,
+                    BookshelfFilter.fromOrdinal(AppConfig.bookshelfFilter)
+                )
                 //排序
                 when (bookSort) {
-                    1 -> list.sortedByDescending { it.latestChapterTime }
-                    2 -> list.sortedWith { o1, o2 ->
+                    1 -> filtered.sortedByDescending { it.latestChapterTime }
+                    2 -> filtered.sortedWith { o1, o2 ->
                         o1.name.cnCompare(o2.name)
                     }
 
-                    3 -> list.sortedBy { it.order }
+                    3 -> filtered.sortedBy { it.order }
 
                     // 综合排序 issue #3192
-                    4 -> list.sortedByDescending {
+                    4 -> filtered.sortedByDescending {
                         max(it.latestChapterTime, it.durChapterTime)
                     }
                     // 按作者排序
-                    5 -> list.sortedWith { o1, o2 ->
+                    5 -> filtered.sortedWith { o1, o2 ->
                         o1.author.cnCompare(o2.author)
                     }
 
-                    else -> list.sortedByDescending { it.durChapterTime }
+                    else -> filtered.sortedByDescending { it.durChapterTime }
                 }
             }.flowWithLifecycleAndDatabaseChangeFirst(
                 viewLifecycleOwner.lifecycle,
@@ -258,6 +265,9 @@ class BooksFragment() : BaseFragment(R.layout.fragment_books),
         super.observeLiveBus()
         observeEvent<String>(EventBus.UP_BOOKSHELF) {
             booksAdapter.notification(it)
+        }
+        observeEvent<String>(EventBus.BOOKSHELF_FILTER_CHANGED) {
+            upRecyclerData()
         }
         observeEvent<String>(EventBus.BOOKSHELF_REFRESH) {
             booksAdapter.notifyDataSetChanged()
