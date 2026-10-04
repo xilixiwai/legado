@@ -179,4 +179,63 @@ class BookShelfFilterTest {
             }
         }
     }
+
+    // 边界:1 章 + 未读 ≠ 已读完(未读状态优先,对齐成熟实现的判定顺序)
+    @Test
+    fun `one chapter unread book is not finished`() {
+        val book = Book(name = "one", author = "a").apply {
+            totalChapterNum = 1
+            durChapterIndex = 0
+            durChapterPos = 0
+            durChapterTime = now - 2 * day
+            latestChapterTime = now - 10 * day
+        }
+        assertEquals(listOf(book), filterBooks(listOf(book), BookshelfFilter.UNREAD, now))
+        assertTrue(filterBooks(listOf(book), BookshelfFilter.FINISHED, now).isEmpty())
+        assertTrue(filterBooks(listOf(book), BookshelfFilter.READING, now).isEmpty())
+    }
+
+    // 边界:1 章 + 已开始阅读 = 已读完
+    @Test
+    fun `one chapter started book is finished`() {
+        val book = Book(name = "one", author = "a").apply {
+            totalChapterNum = 1
+            durChapterIndex = 0
+            durChapterPos = 1
+            durChapterTime = now - day
+            latestChapterTime = now - 10 * day
+        }
+        assertEquals(listOf(book), filterBooks(listOf(book), BookshelfFilter.FINISHED, now))
+        assertTrue(filterBooks(listOf(book), BookshelfFilter.UNREAD, now).isEmpty())
+        assertTrue(filterBooks(listOf(book), BookshelfFilter.READING, now).isEmpty())
+    }
+
+    // 边界:翻到最后一章(index>0 视为已开始阅读)但页内进度为 0 = 已读完
+    @Test
+    fun `last chapter with zero position and positive index is finished`() {
+        val book = Book(name = "last", author = "a").apply {
+            totalChapterNum = 100
+            durChapterIndex = 99
+            durChapterPos = 0
+            durChapterTime = now - day
+            latestChapterTime = now - 10 * day
+        }
+        assertEquals(listOf(book), filterBooks(listOf(book), BookshelfFilter.FINISHED, now))
+        assertTrue(filterBooks(listOf(book), BookshelfFilter.UNREAD, now).isEmpty())
+    }
+
+    // 边界:多章书第一章已开始阅读 = 阅读中,不是已读完也不是未读
+    @Test
+    fun `first chapter started multi chapter book is reading`() {
+        val book = Book(name = "mid", author = "a").apply {
+            totalChapterNum = 100
+            durChapterIndex = 0
+            durChapterPos = 50
+            durChapterTime = now - day
+            latestChapterTime = now - 10 * day
+        }
+        assertEquals(listOf(book), filterBooks(listOf(book), BookshelfFilter.READING, now))
+        assertTrue(filterBooks(listOf(book), BookshelfFilter.FINISHED, now).isEmpty())
+        assertTrue(filterBooks(listOf(book), BookshelfFilter.UNREAD, now).isEmpty())
+    }
 }

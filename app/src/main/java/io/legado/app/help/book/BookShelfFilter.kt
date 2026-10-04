@@ -29,9 +29,9 @@ const val BOOKSHELF_RECENT_RANGE = 7 * 24 * 3600 * 1000L
 /** 该书是否已开始阅读(数据来源:saveRead 持久化的进度字段,只读判断) */
 private fun Book.hasRead(): Boolean = durChapterIndex > 0 || durChapterPos > 0
 
-/** 该书是否读到最后一章(totalChapterNum 未知时不判定为已读完) */
+/** 该书是否已读完(未开始阅读的书不算已读完——如 1 章书未打开;章节数未知时也不判定为已读完) */
 private fun Book.isFinished(): Boolean =
-    totalChapterNum > 0 && durChapterIndex >= totalChapterNum - 1
+    totalChapterNum > 0 && hasRead() && durChapterIndex >= totalChapterNum - 1
 
 /**
  * 按筛选条件过滤书架书籍。
