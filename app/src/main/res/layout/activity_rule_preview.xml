@@ -37,7 +37,7 @@
         android:textSize="12sp"
         app:layout_constraintTop_toBottomOf="@+id/et_test_html" />
 
-    <com.google.android.material.button.MaterialButton
+    <Button
         android:id="@+id/btn_preview"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

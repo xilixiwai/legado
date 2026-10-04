@@ -6,7 +6,9 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
+import java.io.File
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -123,5 +125,18 @@ class RulePreviewTest {
             threw = true
         }
         assertTrue("invalid rule should throw", threw)
+    }
+
+    //主题回归:项目主题不是 MaterialComponents 系,预览布局禁止使用依赖其主题的 Material 组件
+    //(真机崩溃:MaterialButton inflate 时 checkTheme 抛 IllegalArgumentException)
+    @Test
+    fun `preview layout does not use theme dependent material widgets`() {
+        val candidates = listOf(
+            File("src/main/res/layout/activity_rule_preview.xml"),
+            File("app/src/main/res/layout/activity_rule_preview.xml")
+        )
+        val layout = candidates.firstOrNull { it.exists() }
+        assumeTrue("layout not found from test working dir", layout != null)
+        assertFalse(layout!!.readText().contains("com.google.android.material"))
     }
 }
