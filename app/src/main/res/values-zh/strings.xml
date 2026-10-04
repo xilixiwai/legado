@@ -1040,6 +1040,7 @@
     <string name="statistics_recent_read">最近阅读</string>
     <string name="statistics_progress">进度:</string>
     <string name="statistics_duplicate_warning">检测到同一本书存在多条阅读记录,部分合计可能偏高</string>
+    <string name="statistics_clear_record">清空阅读记录</string>
     <string name="statistics_empty">暂无阅读数据</string>
     <string name="page_touch_slop_title">滑动翻页阈值</string>
     <string name="page_touch_slop_dialog_title">滑动翻页阈值（0 = 系统默认值）</string>

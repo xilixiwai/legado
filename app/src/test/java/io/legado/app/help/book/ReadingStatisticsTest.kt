@@ -301,4 +301,80 @@ class ReadingStatisticsTest {
         // 不足 1 秒仍归为 0 秒
         assertEquals("0秒", 999L.toReadDuration())
     }
+
+    // 15. 清空 ReadRecord 后:历史统计归零/清空,Book 当前状态统计保持不变
+    @Test
+    fun `clearing read records zeroes history but keeps book state`() {
+        val a = book("A", durChapterIndex = 9, durChapterPos = 5, totalChapterNum = 10) // 已读完
+        val b = book("B", durChapterIndex = 2, durChapterPos = 1, totalChapterNum = 10) // 阅读中
+        val books = listOf(a, b)
+
+        val before = buildReadingStatistics(
+            books = books,
+            recordShows = listOf(show("A", 100_000L, 3_000L), show("B", 50_000L, 2_000L)),
+            recordRows = listOf(
+                row("", "A", 100_000L, 3_000L),
+                row("", "B", 50_000L, 2_000L)
+            ),
+            totalReadTime = 150_000L
+        )
+        assertEquals(150_000L, before.totalReadTime)
+        assertEquals(2, before.rankByReadTime.size)
+        assertEquals(2, before.recentRead.size)
+
+        // 模拟“清空阅读记录”:ReadRecord 相关入参全部为空,Book 列表原样传入
+        val after = buildReadingStatistics(
+            books = books,
+            recordShows = emptyList(),
+            recordRows = emptyList(),
+            totalReadTime = 0L
+        )
+
+        // 1. 累计阅读时间归零
+        assertEquals(0L, after.totalReadTime)
+        // 2. 阅读时长排行为空
+        assertTrue(after.rankByReadTime.isEmpty())
+        // 3. 最近阅读为空
+        assertTrue(after.recentRead.isEmpty())
+        // 不再显示任何旧 ReadRecord 数据
+        assertTrue(after.items.isEmpty())
+        // 4. Book 阅读进度未被改动
+        assertEquals(9, a.durChapterIndex)
+        assertEquals(5, a.durChapterPos)
+        assertEquals(2, b.durChapterIndex)
+        assertEquals(1, b.durChapterPos)
+        // 5. 书架书籍数量不变
+        assertEquals(2, after.totalBookCount)
+        // 6. 基于 Book 当前状态的统计继续存在
+        assertEquals(1, after.readingCount)
+        assertEquals(1, after.finishedCount)
+        assertEquals(13, after.estimatedReadChapters)
+        assertFalse(after.hasDuplicateRecords)
+    }
+
+    // 16. 清空后“同书多条记录”提示随之消失
+    @Test
+    fun `clearing read records removes duplicate flag`() {
+        val b = book("A", durChapterIndex = 1, durChapterPos = 1, totalChapterNum = 10)
+        val before = buildReadingStatistics(
+            books = listOf(b),
+            recordShows = listOf(show("A", 90_000L, 5_000L)),
+            recordRows = listOf(
+                row("androidId", "A", 40_000L, 4_000L),
+                row("", "A", 50_000L, 5_000L)
+            ),
+            totalReadTime = 90_000L
+        )
+        assertTrue(before.hasDuplicateRecords)
+
+        val after = buildReadingStatistics(
+            books = listOf(b),
+            recordShows = emptyList(),
+            recordRows = emptyList(),
+            totalReadTime = 0L
+        )
+        assertFalse(after.hasDuplicateRecords)
+        assertEquals(0L, after.totalReadTime)
+        assertEquals(1, after.totalBookCount)
+    }
 }

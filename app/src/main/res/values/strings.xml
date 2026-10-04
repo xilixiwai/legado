@@ -1043,6 +1043,7 @@
     <string name="statistics_recent_read">Recently read</string>
     <string name="statistics_progress">Progress:</string>
     <string name="statistics_duplicate_warning">Multiple read records found for the same book; some totals may be inflated</string>
+    <string name="statistics_clear_record">Clear reading records</string>
     <string name="statistics_empty">No reading data yet</string>
     <string name="page_touch_slop_title">Sliding Page Threshold</string>
     <string name="page_touch_slop_dialog_title">Sliding page turn threshold (0 = system default)</string>

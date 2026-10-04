@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.view.ViewGroup
 import androidx.core.view.isVisible
 import androidx.lifecycle.lifecycleScope
+import io.legado.app.R
 import io.legado.app.base.BaseActivity
 import io.legado.app.base.adapter.ItemViewHolder
 import io.legado.app.base.adapter.RecyclerAdapter
@@ -14,6 +15,7 @@ import io.legado.app.databinding.ItemStatisticsBookBinding
 import io.legado.app.help.book.BookReadStat
 import io.legado.app.help.book.ReadingStatistics
 import io.legado.app.help.book.buildReadingStatistics
+import io.legado.app.lib.dialogs.alert
 import io.legado.app.ui.book.search.SearchActivity
 import io.legado.app.utils.applyNavigationBarPadding
 import io.legado.app.utils.startActivityForBook
@@ -29,8 +31,15 @@ import java.util.Locale
  * 阅读统计(只读页面)。
  *
  * 数据来源:现有 [io.legado.app.data.entities.Book] 阅读进度字段 + `readRecord` 表,
- * 仅做“查询/聚合/展示”,**不写入任何数据,也不参与阅读链路**。
- * 聚合逻辑集中在纯函数 [buildReadingStatistics],本类只负责加载与绑定。
+ * 仅做“查询/聚合/展示”。聚合逻辑集中在纯函数 [buildReadingStatistics]。
+ *
+ * 数据边界:
+ * - `readRecord` 表 → 累计阅读时间 / 最后阅读时间 / 时长排行 / 最近阅读(历史记录);
+ * - `Book` 表 → 书籍数量 / 阅读进度 / 已读-阅读中-已读完状态(当前状态)。
+ *
+ * 页面提供的“清空阅读记录”**只清空 `readRecord` 历史记录**,不会触碰
+ * `Book` 的阅读进度、书架内容、章节数据,也不涉及 `ReadBook.saveRead()` /
+ * `upReadTime()` 等阅读核心写入逻辑。
  */
 class ReadingStatisticsActivity : BaseActivity<ActivityReadingStatisticsBinding>() {
 
@@ -43,6 +52,17 @@ class ReadingStatisticsActivity : BaseActivity<ActivityReadingStatisticsBinding>
         binding.rvRank.adapter = rankAdapter
         binding.rvRecent.adapter = recentAdapter
         binding.nestedScroll.applyNavigationBarPadding()
+        binding.tvClearRecord.setOnClickListener { clearReadRecord() }
+    }
+
+    /**
+     * 每次回到本页都重新查询一次。
+     *
+     * 这样无论是本页清空,还是在“阅读记录”页清空后返回,都不会残留上一次的统计结果
+     * (避免 Activity 缓存旧数据、排行榜/最近阅读仍显示旧记录的问题)。
+     */
+    override fun onResume() {
+        super.onResume()
         loadStatistics()
     }
 
@@ -57,6 +77,27 @@ class ReadingStatisticsActivity : BaseActivity<ActivityReadingStatisticsBinding>
                 )
             }
             bindOverview(statistics)
+        }
+    }
+
+    /**
+     * 清空阅读记录(仅 `readRecord` 历史记录)。
+     *
+     * 复用既有 [io.legado.app.data.dao.ReadRecordDao.clear] 能力与“阅读记录”页一致的
+     * 确认弹窗;清空后重新查询,所有依赖 ReadRecord 的统计项同步归零/清空,
+     * 而基于 Book 当前状态的统计(书籍数量/进度/已读状态)保持不变。
+     */
+    private fun clearReadRecord() {
+        alert(R.string.statistics_clear_record, R.string.sure_del) {
+            yesButton {
+                lifecycleScope.launch {
+                    withContext(IO) {
+                        appDb.readRecordDao.clear()
+                    }
+                    loadStatistics()
+                }
+            }
+            noButton()
         }
     }
 
@@ -75,6 +116,8 @@ class ReadingStatisticsActivity : BaseActivity<ActivityReadingStatisticsBinding>
 
         val noData = statistics.items.isEmpty()
         tvEmpty.isVisible = noData
+        // 没有历史记录时清空操作无意义,直接隐藏
+        tvClearRecord.isVisible = !noData
         groupRank.isVisible = rank.isNotEmpty()
         groupRecent.isVisible = recent.isNotEmpty()
 
