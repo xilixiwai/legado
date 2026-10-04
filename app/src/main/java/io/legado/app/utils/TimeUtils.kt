@@ -50,3 +50,25 @@ fun Int.toDurationTime(): String {
         "%02d:%02d".format(minutes, seconds)
     }
 }
+
+/**
+ * 把毫秒时长格式化为“d天h小时m分钟s秒”。
+ *
+ * 该实现原为 [io.legado.app.ui.about.ReadRecordActivity.formatDuring] 的私有逻辑,
+ * 抽取为共享纯函数以避免重复实现;输出与抽取前完全一致(全为 0 时返回“0秒”)。
+ */
+fun Long.toReadDuration(): String {
+    val days = this / (1000 * 60 * 60 * 24)
+    val hours = this % (1000 * 60 * 60 * 24) / (1000 * 60 * 60)
+    val minutes = this % (1000 * 60 * 60) / (1000 * 60)
+    val seconds = this % (1000 * 60) / 1000
+    val d = if (days > 0) "${days}天" else ""
+    val h = if (hours > 0) "${hours}小时" else ""
+    val m = if (minutes > 0) "${minutes}分钟" else ""
+    val s = if (seconds > 0) "${seconds}秒" else ""
+    var time = "$d$h$m$s"
+    if (time.isBlank()) {
+        time = "0秒"
+    }
+    return time
+}

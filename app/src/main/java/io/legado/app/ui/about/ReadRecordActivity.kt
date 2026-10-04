@@ -26,6 +26,7 @@ import io.legado.app.utils.cnCompare
 import io.legado.app.utils.getInt
 import io.legado.app.utils.putInt
 import io.legado.app.utils.startActivityForBook
+import io.legado.app.utils.toReadDuration
 import io.legado.app.utils.viewbindingdelegate.viewBinding
 import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.launch
@@ -216,20 +217,6 @@ class ReadRecordActivity : BaseActivity<ActivityReadRecordBinding>() {
 
     }
 
-    fun formatDuring(mss: Long): String {
-        val days = mss / (1000 * 60 * 60 * 24)
-        val hours = mss % (1000 * 60 * 60 * 24) / (1000 * 60 * 60)
-        val minutes = mss % (1000 * 60 * 60) / (1000 * 60)
-        val seconds = mss % (1000 * 60) / 1000
-        val d = if (days > 0) "${days}天" else ""
-        val h = if (hours > 0) "${hours}小时" else ""
-        val m = if (minutes > 0) "${minutes}分钟" else ""
-        val s = if (seconds > 0) "${seconds}秒" else ""
-        var time = "$d$h$m$s"
-        if (time.isBlank()) {
-            time = "0秒"
-        }
-        return time
-    }
+    fun formatDuring(mss: Long): String = mss.toReadDuration()
 
 }

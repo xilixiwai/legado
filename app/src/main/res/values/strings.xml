@@ -1035,6 +1035,15 @@
     <string name="last_read_time_sort">Sort by read time</string>
     <string name="reading_time_tag">Reading time:</string>
     <string name="last_read_time_tag">Last read time:</string>
+    <string name="reading_statistics">Reading statistics</string>
+    <string name="reading_statistics_summary">Aggregated from existing read records</string>
+    <string name="statistics_total_books">Total books</string>
+    <string name="statistics_read_chapters">Chapters read (est.)</string>
+    <string name="statistics_rank_read_time">Reading time ranking</string>
+    <string name="statistics_recent_read">Recently read</string>
+    <string name="statistics_progress">Progress:</string>
+    <string name="statistics_duplicate_warning">Multiple read records found for the same book; some totals may be inflated</string>
+    <string name="statistics_empty">No reading data yet</string>
     <string name="page_touch_slop_title">Sliding Page Threshold</string>
     <string name="page_touch_slop_dialog_title">Sliding page turn threshold (0 = system default)</string>
     <string name="page_touch_slop_summary">How far to slide to trigger a page slide (system default %s px)</string>

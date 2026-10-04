@@ -104,6 +104,13 @@
             app:iconSpaceReserved="false" />
 
         <io.legado.app.lib.prefs.Preference
+            android:icon="@drawable/ic_bubble_chart"
+            android:key="readingStatistics"
+            android:summary="@string/reading_statistics_summary"
+            android:title="@string/reading_statistics"
+            app:iconSpaceReserved="false" />
+
+        <io.legado.app.lib.prefs.Preference
             android:icon="@drawable/ic_folder_outline"
             android:key="fileManage"
             android:summary="@string/file_manage_summary"
