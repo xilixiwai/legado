@@ -53,8 +53,45 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import splitties.init.appCtx
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+
+// 刷新正文时的定位锚点长度:锚点过短容易误匹配,过长则源站改写后容易丢失
+private const val REFRESH_ANCHOR_LENGTH = 64
+
+/**
+ * 判断传入的书籍进度是否比当前内存中已落盘的进度更旧。
+ * 目录更新、详情页刷新等异步流程会长期持有打开时的书籍快照,
+ * 完成时若直接回写,会把最新阅读位置覆盖回旧位置。
+ */
+internal fun isStaleProgress(
+    incomingBookUrl: String?,
+    incomingSaveTime: Long,
+    currentBookUrl: String?,
+    currentSaveTime: Long
+): Boolean {
+    if (incomingBookUrl.isNullOrEmpty() || currentBookUrl.isNullOrEmpty()) return false
+    if (incomingBookUrl != currentBookUrl) return false
+    if (currentSaveTime <= 0) return false
+    return incomingSaveTime < currentSaveTime
+}
+
+/**
+ * 在新正文中重新定位锚点文本,多个匹配时取距离原位置最近的,找不到返回 -1
+ */
+internal fun resolveAnchorPos(content: String, anchorText: String, oldPos: Int): Int {
+    if (content.isEmpty() || anchorText.isEmpty()) return -1
+    var best = content.indexOf(anchorText)
+    if (best < 0) return -1
+    var start = best
+    while (best != oldPos) {
+        start = content.indexOf(anchorText, start + 1)
+        if (start < 0) break
+        if (abs(start - oldPos) < abs(best - oldPos)) best = start
+    }
+    return best
+}
 
 
 @Suppress("MemberVisibilityCanBePrivate")
@@ -95,7 +132,24 @@ object ReadBook : CoroutineScope by MainScope() {
     val preDownloadSemaphore = Semaphore(2)
     val executor = globalExecutor
 
+    /* 最近一次阅读位置落盘时间,用于识别异步流程携带的旧进度快照 */
+    var lastSaveTime: Long = 0
+        private set
+
+    /* 刷新正文前的定位锚点,重载完成后按锚点重新定位,防止正文变化导致位置漂移 */
+    private data class PositionAnchor(
+        val bookUrl: String,
+        val chapterIndex: Int,
+        val chapterPos: Int,
+        val anchorText: String
+    )
+
+    private var pendingPositionAnchor: PositionAnchor? = null
+
     fun resetData(book: Book) {
+        if (pendingPositionAnchor?.bookUrl != book.bookUrl) {
+            pendingPositionAnchor = null
+        }
         releaseAndCancel()
         ReadBook.book = book
         readRecord.bookName = book.name
@@ -127,6 +181,7 @@ object ReadBook : CoroutineScope by MainScope() {
 
     fun upData(book: Book) {
         releaseAndCancel()
+        val oldBook = ReadBook.book
         ReadBook.book = book
         chapterSize = appDb.bookChapterDao.getChapterCount(book.bookUrl)
         simulatedChapterSize = if (book.readSimulating()) {
@@ -134,7 +189,16 @@ object ReadBook : CoroutineScope by MainScope() {
         } else {
             chapterSize
         }
-        if (durChapterIndex != book.durChapterIndex) {
+        if (isStaleProgress(book.bookUrl, book.durChapterTime, oldBook?.bookUrl, lastSaveTime)) {
+            // 异步流程携带的是打开时的书籍快照,禁止旧进度覆盖内存中更新的阅读位置
+            AppLog.put(
+                "拦截旧进度覆盖《${book.name}》:" +
+                        "${book.durChapterIndex}/${book.durChapterPos} → ${durChapterIndex}/${durChapterPos}"
+            )
+            book.durChapterIndex = durChapterIndex
+            book.durChapterPos = durChapterPos
+            oldBook?.let { book.durChapterTitle = it.durChapterTitle }
+        } else if (durChapterIndex != book.durChapterIndex) {
             durChapterIndex = book.durChapterIndex
             durChapterPos = book.durChapterPos
             clearTextChapter()
@@ -226,6 +290,51 @@ object ReadBook : CoroutineScope by MainScope() {
         prevTextChapter = null
         curTextChapter = null
         nextTextChapter = null
+    }
+
+    /**
+     * 刷新正文前记录当前位置的文本锚点,重载完成后按锚点重新定位,
+     * 保证刷新前后阅读位置对应同样的内容
+     */
+    fun preserveCurrentPositionForRefresh() {
+        val currentBook = book ?: return
+        val textChapter = curTextChapter?.takeIf {
+            it.isCompleted &&
+                    it.chapter.index == durChapterIndex &&
+                    it.chapter.bookUrl == currentBook.bookUrl
+        } ?: return
+        val content = textChapter.getContent()
+        if (durChapterPos < 0 || durChapterPos >= content.length) return
+        val anchorText = content.drop(durChapterPos).take(REFRESH_ANCHOR_LENGTH)
+        if (anchorText.isEmpty()) return
+        pendingPositionAnchor = PositionAnchor(
+            currentBook.bookUrl,
+            durChapterIndex,
+            durChapterPos,
+            anchorText
+        )
+    }
+
+    /**
+     * 正文重载完成后按锚点重新定位,找不到锚点时保持原位置
+     */
+    private fun resolvePendingPositionAnchor(currentBook: Book, textChapter: TextChapter) {
+        val anchor = pendingPositionAnchor ?: return
+        if (curTextChapter !== textChapter) return
+        if (anchor.bookUrl != currentBook.bookUrl ||
+            anchor.chapterIndex != durChapterIndex ||
+            anchor.chapterIndex != textChapter.chapter.index
+        ) {
+            pendingPositionAnchor = null
+            return
+        }
+        if (!textChapter.isCompleted) return
+        pendingPositionAnchor = null
+        val newPos = resolveAnchorPos(textChapter.getContent(), anchor.anchorText, anchor.chapterPos)
+        if (newPos < 0 || newPos == anchor.chapterPos) return
+        AppLog.put("正文刷新锚点定位《${currentBook.name}》:${anchor.chapterPos} → $newPos")
+        durChapterPos = newPos
+        saveRead()
     }
 
     fun clearSearchResult() {
@@ -737,6 +846,7 @@ object ReadBook : CoroutineScope by MainScope() {
                         }
                         callBack?.onLayoutPageCompleted(index, page)
                     }
+                    resolvePendingPositionAnchor(book, textChapter)
                     if (upContent) callBack?.upContent(offset, !available && resetPageOffset)
                     curPageChanged()
                     callBack?.contentLoadFinish()
@@ -904,6 +1014,7 @@ object ReadBook : CoroutineScope by MainScope() {
                 val book = book ?: return@execute
                 book.lastCheckCount = 0
                 book.durChapterTime = System.currentTimeMillis()
+                lastSaveTime = book.durChapterTime
                 val chapterChanged = book.durChapterIndex != durChapterIndex
                 book.durChapterIndex = durChapterIndex
                 book.durChapterPos = durChapterPos
@@ -965,11 +1076,22 @@ object ReadBook : CoroutineScope by MainScope() {
 
     fun onChapterListUpdated(newBook: Book, loadContent: Boolean = true) {
         if (newBook.isSameNameAuthor(book)) {
+            val oldBook = book
             book = newBook
             chapterSize = newBook.totalChapterNum
             simulatedChapterSize = newBook.simulatedTotalChapterNum()
             if (simulatedChapterSize > 0 && durChapterIndex > simulatedChapterSize - 1) {
                 durChapterIndex = simulatedChapterSize - 1
+            }
+            if (isStaleProgress(newBook.bookUrl, newBook.durChapterTime, oldBook?.bookUrl, lastSaveTime)) {
+                // 目录更新流程持有的是更新前的书籍快照,把最新阅读位置抄写回去,避免旧进度落库
+                AppLog.put(
+                    "目录更新拦截旧进度《${newBook.name}》:" +
+                            "${newBook.durChapterIndex}/${newBook.durChapterPos} → ${durChapterIndex}/${durChapterPos}"
+                )
+                newBook.durChapterIndex = durChapterIndex
+                newBook.durChapterPos = durChapterPos
+                oldBook?.let { newBook.durChapterTitle = it.durChapterTitle }
             }
             callBack?.upMenuView()
             if (callBack == null) {
