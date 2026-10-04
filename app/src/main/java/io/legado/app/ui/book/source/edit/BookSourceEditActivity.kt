@@ -30,6 +30,7 @@ import io.legado.app.lib.theme.primaryColor
 import io.legado.app.ui.book.search.SearchActivity
 import io.legado.app.ui.book.search.SearchScope
 import io.legado.app.ui.book.source.debug.BookSourceDebugActivity
+import io.legado.app.ui.book.source.preview.RulePreviewActivity
 import io.legado.app.ui.file.HandleFileContract
 import io.legado.app.ui.login.SourceLoginActivity
 import io.legado.app.ui.qrcode.QrCodeResult
@@ -131,6 +132,11 @@ class BookSourceEditActivity :
                 startActivity<BookSourceDebugActivity> {
                     putExtra("key", source.bookSourceUrl)
                 }
+            }
+
+            //规则预览:直接使用当前编辑中的(未保存)书源对象,不落库
+            R.id.menu_preview -> startActivity<RulePreviewActivity> {
+                putExtra("source", GSON.toJson(getSource()))
             }
 
             R.id.menu_clear_cookie -> viewModel.clearCookie(getSource().bookSourceUrl)

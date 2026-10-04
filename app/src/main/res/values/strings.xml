@@ -1240,4 +1240,13 @@
     <string name="auto_check_new_backup_t">自动检查新备份</string>
     <string name="auto_check_new_backup_s">打开软件时检查是否有新备份，有新备份时提示是否更新</string>
     <string name="sys_image_picker">系统图片选择器</string>
+    <string name="rule_preview">Rule preview</string>
+    <string name="preview_test_html_hint">Paste test HTML here</string>
+    <string name="preview_run">Preview</string>
+    <string name="preview_running">Parsing…</string>
+    <string name="preview_done">Success</string>
+    <string name="preview_empty">No result</string>
+    <string name="preview_error">Parse error</string>
+    <string name="preview_source_invalid">Invalid book source data</string>
+    <string name="preview_js_hint">Preview uses the book source\'s existing rule engine. Rules containing JavaScript may access source context (cookie/cache/network) just like real reading. Local test data is never saved.</string>
 </resources>

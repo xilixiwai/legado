@@ -1238,4 +1238,13 @@
     <string name="auto_check_new_backup_t">自动检查新备份</string>
     <string name="auto_check_new_backup_s">打开软件时检查是否有新备份，有新备份时提示是否更新</string>
     <string name="sys_image_picker">系统图片选择器</string>
+    <string name="rule_preview">规则预览</string>
+    <string name="preview_test_html_hint">在此粘贴测试 HTML</string>
+    <string name="preview_run">预览</string>
+    <string name="preview_running">解析中…</string>
+    <string name="preview_done">解析成功</string>
+    <string name="preview_empty">无结果</string>
+    <string name="preview_error">解析失败</string>
+    <string name="preview_source_invalid">书源数据无效</string>
+    <string name="preview_js_hint">预览使用书源现有规则执行环境;含 JavaScript 的规则可能与正式阅读一样访问书源上下文(cookie/缓存/网络)。本地测试数据不会被保存。</string>
 </resources>

@@ -114,6 +114,13 @@ android {
         buildConfig = true
         viewBinding = true
     }
+    testOptions {
+        unitTests {
+            //规则引擎在部分路径使用 android.text.TextUtils,
+            //JVM 单元测试中返回默认值而非抛出 not-mocked 异常
+            returnDefaultValues = true
+        }
+    }
     buildTypes {
         release {
             if (project.hasProperty("RELEASE_STORE_FILE")) {

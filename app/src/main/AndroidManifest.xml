@@ -233,6 +233,12 @@
             android:name=".ui.book.source.debug.BookSourceDebugActivity"
             android:launchMode="singleTop"
             android:screenOrientation="behind" />
+        <!-- 书源规则预览 -->
+        <activity
+            android:name=".ui.book.source.preview.RulePreviewActivity"
+            android:launchMode="singleTop"
+            android:screenOrientation="behind"
+            android:windowSoftInputMode="adjustResize" />
         <!-- 目录 -->
         <activity
             android:name=".ui.book.toc.TocActivity"
