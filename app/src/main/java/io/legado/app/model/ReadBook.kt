@@ -30,6 +30,7 @@ import io.legado.app.service.CacheBookService
 import io.legado.app.ui.book.read.page.entities.TextChapter
 import io.legado.app.ui.book.read.page.provider.ChapterProvider
 import io.legado.app.ui.book.read.page.provider.LayoutProgressListener
+import io.legado.app.utils.DiagnosticUtils
 import io.legado.app.utils.postEvent
 import io.legado.app.utils.stackTraceStr
 import io.legado.app.utils.toastOnUi
@@ -682,7 +683,14 @@ object ReadBook : CoroutineScope by MainScope() {
             val book = book!!
             val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, index) ?: return@async
             if (addLoading(index)) {
-                BookHelp.getContent(book, chapter)?.let {
+                // [诊断] 正文链路:仅记录 book/chapter、cache hit/miss、耗时、异常类型,不改变加载行为
+                val startTime = System.currentTimeMillis()
+                val cachedContent = BookHelp.getContent(book, chapter)
+                AppLog.put(
+                    "[诊断]正文开始 book=${book.name} chapter=$index(${chapter.title}) " +
+                        "cache=${if (cachedContent != null) "hit" else "miss"}"
+                )
+                cachedContent?.let {
                     contentLoadFinish(
                         book,
                         chapter,
@@ -691,6 +699,10 @@ object ReadBook : CoroutineScope by MainScope() {
                         resetPageOffset,
                         success = success
                     )
+                    AppLog.put(
+                        "[诊断]正文成功 book=${book.name} chapter=$index cache=hit " +
+                            "耗时=${DiagnosticUtils.elapsedMs(startTime)}ms"
+                    )
                 } ?: download(
                     downloadScope,
                     chapter,
@@ -698,6 +710,12 @@ object ReadBook : CoroutineScope by MainScope() {
                 )
             }
         }.onError {
+            AppLog.put(
+                "[诊断]正文失败 book=${book?.name} chapter=$index " +
+                    "timeout=${DiagnosticUtils.isTimeout(it)} " +
+                    "异常=${DiagnosticUtils.exceptionType(it)} ${it.localizedMessage}",
+                it
+            )
             AppLog.put("加载正文出错\n${it.localizedMessage}")
         }
     }
@@ -709,13 +727,29 @@ object ReadBook : CoroutineScope by MainScope() {
         success: (() -> Unit)? = null
     ) = withContext(IO) {
         if (addLoading(index)) {
+            // [诊断] 正文链路(await 路径):仅记录 cache hit/miss、耗时、异常类型,不改变加载行为
+            val startTime = System.currentTimeMillis()
+            var diagBook: Book? = null
             try {
                 val book = book!!
+                diagBook = book
                 val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, index)!!
-                val content = BookHelp.getContent(book, chapter) ?: downloadAwait(chapter)
+                val cachedContent = BookHelp.getContent(book, chapter)
+                val content = cachedContent ?: downloadAwait(chapter)
                 contentLoadFinishAwait(book, chapter, content, upContent, resetPageOffset)
                 success?.invoke()
+                AppLog.put(
+                    "[诊断]正文成功 book=${book.name} chapter=$index " +
+                        "cache=${if (cachedContent != null) "hit" else "miss"} " +
+                        "耗时=${DiagnosticUtils.elapsedMs(startTime)}ms"
+                )
             } catch (e: Exception) {
+                AppLog.put(
+                    "[诊断]正文失败 book=${diagBook?.name} chapter=$index " +
+                        "timeout=${DiagnosticUtils.isTimeout(e)} " +
+                        "异常=${DiagnosticUtils.exceptionType(e)} ${e.localizedMessage}",
+                    e
+                )
                 AppLog.put("加载正文出错\n${e.localizedMessage}")
             } finally {
                 removeLoading(index)

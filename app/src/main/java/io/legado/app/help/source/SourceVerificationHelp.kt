@@ -7,6 +7,7 @@ import io.legado.app.help.CacheManager
 import io.legado.app.help.IntentData
 import io.legado.app.ui.association.VerificationCodeActivity
 import io.legado.app.ui.browser.WebViewActivity
+import io.legado.app.utils.DiagnosticUtils
 import io.legado.app.utils.isMainThread
 import io.legado.app.utils.startActivity
 import splitties.init.appCtx
@@ -44,6 +45,13 @@ object SourceVerificationHelp {
 
         clearResult(source.getKey())
 
+        // [诊断] 源验证命中:仅记录 source/开始时间,不改变下面的阻塞与验证行为
+        val startTime = System.currentTimeMillis()
+        AppLog.put(
+            "[诊断]源验证命中 source=${source.getKey()} useBrowser=$useBrowser " +
+                "url=${DiagnosticUtils.sanitizeUrl(url)}"
+        )
+
         if (!useBrowser) {
             appCtx.startActivity<VerificationCodeActivity> {
                 putExtra("imageUrl", url)
@@ -70,6 +78,12 @@ object SourceVerificationHelp {
         result.ifBlank {
             throw NoStackTraceException("验证结果为空")
         }
+
+        // [诊断] 源验证结束:记录等待耗时
+        AppLog.put(
+            "[诊断]源验证返回 source=${source.getKey()} " +
+                "耗时=${DiagnosticUtils.elapsedMs(startTime)}ms"
+        )
 
         return result
     }

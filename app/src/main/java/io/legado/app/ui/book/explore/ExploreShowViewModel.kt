@@ -12,6 +12,7 @@ import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.SearchBook
 import io.legado.app.help.book.isNotShelf
 import io.legado.app.model.webBook.WebBook
+import io.legado.app.utils.DiagnosticUtils
 import io.legado.app.utils.printOnDebug
 import io.legado.app.utils.stackTraceStr
 import kotlinx.coroutines.Dispatchers.IO
@@ -70,6 +71,12 @@ class ExploreShowViewModel(application: Application) : BaseViewModel(application
         val source = bookSource
         val url = exploreUrl
         if (source == null || url == null) return
+        // [诊断] 发现链路:仅记录来源/请求 URL(脱敏)/耗时/异常类型,不改变任何请求行为
+        val startTime = System.currentTimeMillis()
+        AppLog.put(
+            "[诊断]发现开始 source=${source.bookSourceUrl} page=$page " +
+                "url=${DiagnosticUtils.sanitizeUrl(url)}"
+        )
         WebBook.exploreBook(viewModelScope, source, url, page)
             .timeout(if (BuildConfig.DEBUG) 0L else 30000L)
             .onSuccess(IO) { searchBooks ->
@@ -77,9 +84,20 @@ class ExploreShowViewModel(application: Application) : BaseViewModel(application
                 booksData.postValue(books.toList())
                 appDb.searchBookDao.insert(*searchBooks.toTypedArray())
                 page++
+                AppLog.put(
+                    "[诊断]发现成功 source=${source.bookSourceUrl} count=${searchBooks.size} " +
+                        "耗时=${DiagnosticUtils.elapsedMs(startTime)}ms"
+                )
             }.onError {
                 it.printOnDebug()
                 errorLiveData.postValue(it.stackTraceStr)
+                AppLog.put(
+                    "[诊断]发现失败 source=${source.bookSourceUrl} " +
+                        "耗时=${DiagnosticUtils.elapsedMs(startTime)}ms " +
+                        "timeout=${DiagnosticUtils.isTimeout(it)} " +
+                        "异常=${DiagnosticUtils.exceptionType(it)} ${it.localizedMessage}",
+                    it
+                )
             }
     }
 

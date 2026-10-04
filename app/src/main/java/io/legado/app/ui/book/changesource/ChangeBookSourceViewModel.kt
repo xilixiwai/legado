@@ -25,6 +25,7 @@ import io.legado.app.help.config.SourceConfig
 import io.legado.app.help.coroutine.Coroutine
 import io.legado.app.help.source.SourceHelp
 import io.legado.app.model.webBook.WebBook
+import io.legado.app.utils.DiagnosticUtils
 import io.legado.app.utils.internString
 import io.legado.app.utils.mapParallel
 import io.legado.app.utils.mapParallelSafe
@@ -235,12 +236,26 @@ open class ChangeBookSourceViewModel(application: Application) : BaseViewModel(a
             }.onStart {
                 searchStateData.postValue(true)
             }.mapParallel(threadCount) {
+                // [诊断] 换源:单个源的开始/结束/耗时/是否超时/异常类型。
+                // 不改变 withTimeout(60000L) 与 ensureActive() 的取消语义。
+                val startTime = System.currentTimeMillis()
                 try {
                     withTimeout(60000L) {
                         search(it)
                     }
-                } catch (_: Throwable) {
+                    AppLog.put(
+                        "[诊断]换源搜索成功 source=${it.bookSourceUrl} " +
+                            "耗时=${DiagnosticUtils.elapsedMs(startTime)}ms"
+                    )
+                } catch (t: Throwable) {
                     currentCoroutineContext().ensureActive()
+                    AppLog.put(
+                        "[诊断]换源搜索失败 source=${it.bookSourceUrl} " +
+                            "耗时=${DiagnosticUtils.elapsedMs(startTime)}ms " +
+                            "timeout=${DiagnosticUtils.isTimeout(t)} " +
+                            "异常=${DiagnosticUtils.exceptionType(t)} ${t.localizedMessage}",
+                        t
+                    )
                 }
                 it
             }.onEachIndexed { index, value ->
@@ -470,7 +485,9 @@ open class ChangeBookSourceViewModel(application: Application) : BaseViewModel(a
     }
 
     suspend fun getToc(book: Book): Result<Pair<List<BookChapter>, BookSource>> {
-        return kotlin.runCatching {
+        // [诊断] 换源-获取目录:记录 source、开始/结束、耗时、是否超时、异常类型,不改变返回值
+        val startTime = System.currentTimeMillis()
+        val result = kotlin.runCatching {
             val source = appDb.bookSourceDao.getBookSource(book.origin)
                 ?: throw NoStackTraceException("书源不存在")
             if (book.tocUrl.isEmpty()) {
@@ -479,6 +496,22 @@ open class ChangeBookSourceViewModel(application: Application) : BaseViewModel(a
             val toc = WebBook.getChapterListAwait(source, book).getOrThrow()
             Pair(toc, source)
         }
+        result.onSuccess {
+            AppLog.put(
+                "[诊断]换源目录成功 source=${it.second.bookSourceUrl} book=${book.name} " +
+                    "章节数=${it.first.size} 耗时=${DiagnosticUtils.elapsedMs(startTime)}ms"
+            )
+        }
+        result.onFailure {
+            AppLog.put(
+                "[诊断]换源目录失败 source=${book.origin} book=${book.name} " +
+                    "耗时=${DiagnosticUtils.elapsedMs(startTime)}ms " +
+                    "timeout=${DiagnosticUtils.isTimeout(it)} " +
+                    "异常=${DiagnosticUtils.exceptionType(it)} ${it.localizedMessage}",
+                it
+            )
+        }
+        return result
     }
 
     fun disableSource(searchBook: SearchBook) {

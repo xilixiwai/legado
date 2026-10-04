@@ -12,6 +12,7 @@ import com.script.buildScriptBindings
 import com.script.rhino.RhinoScriptEngine
 import com.script.rhino.runScriptWithContext
 import io.legado.app.constant.AppConst.UA_NAME
+import io.legado.app.constant.AppLog
 import io.legado.app.constant.AppPattern
 import io.legado.app.constant.AppPattern.JS_PATTERN
 import io.legado.app.constant.AppPattern.dataUriRegex
@@ -40,6 +41,7 @@ import io.legado.app.help.http.postJson
 import io.legado.app.help.http.postMultipart
 import io.legado.app.help.source.getShareScope
 import io.legado.app.model.Debug
+import io.legado.app.utils.DiagnosticUtils
 import io.legado.app.utils.EncoderUtils
 import io.legado.app.utils.GSON
 import io.legado.app.utils.GSONStrict
@@ -408,6 +410,12 @@ class AnalyzeUrl(
         concurrentRateLimiter.withLimit {
             setCookie()
             val strResponse: StrResponse
+            // [诊断] 记录本次请求的有效 useWebView 决策(WebView 路径有 60s 超时,是"外部慢"的常见来源)。
+            // 纯观测:不改变下面分支条件;高频日志走 putNotSave,避免冲刷 App 内日志环形缓冲。
+            AppLog.putNotSave(
+                "[诊断]请求 useWebView=${this.useWebView && useWebView} method=$method " +
+                    "url=${DiagnosticUtils.sanitizeUrl(url)}"
+            )
             if (this.useWebView && useWebView) {
                 strResponse = when (method) {
                     RequestMethod.POST -> {
