@@ -103,6 +103,7 @@ import io.legado.app.utils.ACache
 import io.legado.app.utils.Debounce
 import io.legado.app.utils.LogUtils
 import io.legado.app.utils.NetworkUtils
+import io.legado.app.utils.ReadProgressLog
 import io.legado.app.utils.StartActivityContract
 import io.legado.app.utils.applyOpenTint
 import io.legado.app.utils.buildMainHandler
@@ -363,6 +364,11 @@ class ReadBookActivity : BaseReadBookActivity(),
         super.onPause()
         autoPageStop()
         backupJob?.cancel()
+        ReadProgressLog.log(
+            "EXIT", ReadBook.book,
+            index = ReadBook.durChapterIndex, pos = ReadBook.durChapterPos,
+            title = ReadBook.curTextChapter?.chapter?.title ?: ReadBook.book?.durChapterTitle
+        )
         ReadBook.saveRead()
         ReadBook.cancelPreDownloadTask()
         unregisterReceiver(timeBatteryReceiver)

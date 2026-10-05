@@ -14,6 +14,7 @@ import io.legado.app.model.ReadBook
 import io.legado.app.model.localBook.LocalBook
 import io.legado.app.utils.FileDoc
 import io.legado.app.utils.GSON
+import io.legado.app.utils.ReadProgressLog
 import io.legado.app.utils.createFileIfNotExist
 import io.legado.app.utils.openOutputStream
 import io.legado.app.utils.toastOnUi
@@ -37,6 +38,11 @@ class TocViewModel(application: Application) : BaseViewModel(application) {
 
     fun upBookTocRule(book: Book, complete: (Throwable?) -> Unit) {
         execute {
+            ReadProgressLog.log(
+                "TOC_PERSIST_TOC", book,
+                index = book.durChapterIndex, pos = book.durChapterPos,
+                extra = "memIdx=${ReadBook.durChapterIndex} memPos=${ReadBook.durChapterPos} time=${book.durChapterTime}"
+            )
             appDb.bookDao.update(book)
             LocalBook.getChapterList(book).let {
                 appDb.bookChapterDao.delByBook(book.bookUrl)

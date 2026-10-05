@@ -34,6 +34,7 @@ import io.legado.app.ui.book.read.page.entities.TextChapter
 import io.legado.app.ui.book.searchContent.SearchResult
 import io.legado.app.utils.DocumentUtils
 import io.legado.app.utils.FileUtils
+import io.legado.app.utils.ReadProgressLog
 import io.legado.app.utils.isContentScheme
 import io.legado.app.utils.mapParallelSafe
 import io.legado.app.utils.postEvent
@@ -110,6 +111,13 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
 
     private suspend fun initBook(book: Book) {
         val isSameBook = ReadBook.book?.bookUrl == book.bookUrl
+        ReadProgressLog.log(
+            "INIT_BOOK", book,
+            index = book.durChapterIndex, pos = book.durChapterPos,
+            extra = "isSameBook=$isSameBook time=${book.durChapterTime} " +
+                    "inBookshelf=${ReadBook.inBookshelf} chapterChanged=${ReadBook.chapterChanged} " +
+                    "memIdx=${ReadBook.durChapterIndex} memPos=${ReadBook.durChapterPos}"
+        )
         if (isSameBook) {
             ReadBook.upData(book)
         } else {
@@ -190,6 +198,11 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
         if (book.isLocal) {
             kotlin.runCatching {
                 LocalBook.getChapterList(book).let {
+                    ReadProgressLog.log(
+                        "TOC_PERSIST_VM", book,
+                        index = book.durChapterIndex, pos = book.durChapterPos,
+                        extra = "memIdx=${ReadBook.durChapterIndex} memPos=${ReadBook.durChapterPos} local=true"
+                    )
                     appDb.bookChapterDao.delByBook(book.bookUrl)
                     appDb.bookChapterDao.insert(*it.toTypedArray())
                     appDb.bookDao.update(book)
@@ -214,6 +227,12 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
                 val oldBook = book.copy()
                 WebBook.getChapterListAwait(it, book, true)
                     .onSuccess { cList ->
+                        ReadProgressLog.log(
+                            "TOC_PERSIST_VM", book,
+                            index = book.durChapterIndex, pos = book.durChapterPos,
+                            extra = "memIdx=${ReadBook.durChapterIndex} memPos=${ReadBook.durChapterPos} " +
+                                    "oldBookUrl=${oldBook.bookUrl} size=${cList.size}"
+                        )
                         if (oldBook.bookUrl == book.bookUrl) {
                             appDb.bookDao.update(book)
                         } else {
@@ -270,6 +289,11 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
     fun changeTo(book: Book, toc: List<BookChapter>) {
         changeSourceCoroutine?.cancel()
         changeSourceCoroutine = execute {
+            ReadProgressLog.log(
+                "CHANGE_SOURCE", book,
+                index = book.durChapterIndex, pos = book.durChapterPos,
+                extra = "oldBookUrl=${ReadBook.book?.bookUrl} memIdx=${ReadBook.durChapterIndex} memPos=${ReadBook.durChapterPos}"
+            )
             ReadBook.upMsg(context.getString(R.string.loading))
             ReadBook.book?.migrateTo(book, toc)
             book.removeType(BookType.updateError)

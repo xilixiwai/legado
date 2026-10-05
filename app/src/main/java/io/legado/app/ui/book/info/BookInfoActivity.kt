@@ -63,6 +63,7 @@ import io.legado.app.utils.ColorUtils
 import io.legado.app.utils.ConvertUtils
 import io.legado.app.utils.FileDoc
 import io.legado.app.utils.GSON
+import io.legado.app.utils.ReadProgressLog
 import io.legado.app.utils.StartActivityContract
 import io.legado.app.utils.applyNavigationBarPadding
 import io.legado.app.utils.dpToPx
@@ -95,6 +96,11 @@ class BookInfoActivity :
                         book.durChapterIndex = it.first
                         book.durChapterPos = it.second
                         chapterChanged = it.third
+                        ReadProgressLog.log(
+                            "TOC_JUMP_PERSIST", book,
+                            index = book.durChapterIndex, pos = book.durChapterPos,
+                            extra = "chapterChanged=$chapterChanged"
+                        )
                         appDb.bookDao.update(book)
                     }
                     startReadActivity(book)

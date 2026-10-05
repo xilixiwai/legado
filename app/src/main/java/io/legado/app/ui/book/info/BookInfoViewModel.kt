@@ -37,6 +37,7 @@ import io.legado.app.model.analyzeRule.AnalyzeUrl
 import io.legado.app.model.localBook.LocalBook
 import io.legado.app.model.webBook.WebBook
 import io.legado.app.utils.ArchiveUtils
+import io.legado.app.utils.ReadProgressLog
 import io.legado.app.utils.UrlUtil
 import io.legado.app.utils.isContentScheme
 import io.legado.app.utils.postEvent
@@ -198,6 +199,11 @@ class BookInfoViewModel(application: Application) : BaseViewModel(application) {
                     }
                     bookData.postValue(it)
                     if (inBookshelf) {
+                        ReadProgressLog.log(
+                            "INFO_SAVE", it,
+                            index = it.durChapterIndex, pos = it.durChapterPos,
+                            extra = "time=${it.durChapterTime}"
+                        )
                         it.save()
                     }
                     if (it.isWebFile) {
@@ -220,6 +226,11 @@ class BookInfoViewModel(application: Application) : BaseViewModel(application) {
         if (book.isLocal) {
             execute(scope) {
                 LocalBook.getChapterList(book).let {
+                    ReadProgressLog.log(
+                        "TOC_PERSIST_INFO", book,
+                        index = book.durChapterIndex, pos = book.durChapterPos,
+                        extra = "memIdx=${ReadBook.durChapterIndex} memPos=${ReadBook.durChapterPos} local=true"
+                    )
                     appDb.bookDao.update(book)
                     appDb.bookChapterDao.delByBook(book.bookUrl)
                     appDb.bookChapterDao.insert(*it.toTypedArray())
@@ -240,6 +251,12 @@ class BookInfoViewModel(application: Application) : BaseViewModel(application) {
             WebBook.getChapterList(scope, bookSource, book, runPreUpdateJs)
                 .onSuccess(IO) {
                     if (inBookshelf) {
+                        ReadProgressLog.log(
+                            "TOC_PERSIST_INFO", book,
+                            index = book.durChapterIndex, pos = book.durChapterPos,
+                            extra = "memIdx=${ReadBook.durChapterIndex} memPos=${ReadBook.durChapterPos} " +
+                                    "oldBookUrl=${oldBook.bookUrl} time=${book.durChapterTime}"
+                        )
                         appDb.bookDao.replace(oldBook, book)
                         /**
                          * runPreUpdateJs 有可能会修改 book 的 bookUrl

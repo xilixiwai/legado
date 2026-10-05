@@ -31,6 +31,7 @@ import io.legado.app.ui.book.read.page.entities.TextChapter
 import io.legado.app.ui.book.read.page.provider.ChapterProvider
 import io.legado.app.ui.book.read.page.provider.LayoutProgressListener
 import io.legado.app.utils.DiagnosticUtils
+import io.legado.app.utils.ReadProgressLog
 import io.legado.app.utils.postEvent
 import io.legado.app.utils.stackTraceStr
 import io.legado.app.utils.toastOnUi
@@ -164,6 +165,11 @@ object ReadBook : CoroutineScope by MainScope() {
         contentProcessor = ContentProcessor.get(book)
         durChapterIndex = book.durChapterIndex
         durChapterPos = book.durChapterPos
+        ReadProgressLog.log(
+            "RESTORE_RESET", book,
+            index = book.durChapterIndex, pos = book.durChapterPos,
+            extra = "time=${book.durChapterTime} chapterSize=$chapterSize"
+        )
         isLocalBook = book.isLocal
         clearTextChapter()
         callBack?.upContent()
@@ -190,7 +196,14 @@ object ReadBook : CoroutineScope by MainScope() {
         } else {
             chapterSize
         }
-        if (isStaleProgress(book.bookUrl, book.durChapterTime, oldBook?.bookUrl, lastSaveTime)) {
+        val stale = isStaleProgress(book.bookUrl, book.durChapterTime, oldBook?.bookUrl, lastSaveTime)
+        ReadProgressLog.log(
+            "RESTORE_UPDATA", book,
+            index = book.durChapterIndex, pos = book.durChapterPos,
+            extra = "time=${book.durChapterTime} memIdx=$durChapterIndex memPos=$durChapterPos " +
+                    "lastSaveTime=$lastSaveTime stale=$stale"
+        )
+        if (stale) {
             // 异步流程携带的是打开时的书籍快照,禁止旧进度覆盖内存中更新的阅读位置
             AppLog.put(
                 "拦截旧进度覆盖《${book.name}》:" +
@@ -263,6 +276,11 @@ object ReadBook : CoroutineScope by MainScope() {
             (durChapterIndex != progress.durChapterIndex
                     || durChapterPos != progress.durChapterPos)
         ) {
+            ReadProgressLog.log(
+                "SYNC_APPLY", book,
+                index = progress.durChapterIndex, pos = progress.durChapterPos,
+                extra = "memIdx=$durChapterIndex memPos=$durChapterPos title=${progress.durChapterTitle}"
+            )
             durChapterIndex = progress.durChapterIndex
             durChapterPos = progress.durChapterPos
             saveRead()
@@ -313,6 +331,10 @@ object ReadBook : CoroutineScope by MainScope() {
             durChapterIndex,
             durChapterPos,
             anchorText
+        )
+        ReadProgressLog.log(
+            "ANCHOR_STORE", currentBook,
+            index = durChapterIndex, pos = durChapterPos
         )
     }
 
@@ -881,6 +903,11 @@ object ReadBook : CoroutineScope by MainScope() {
                         callBack?.onLayoutPageCompleted(index, page)
                     }
                     resolvePendingPositionAnchor(book, textChapter)
+                    ReadProgressLog.log(
+                        "POSITION_APPLY", book,
+                        index = durChapterIndex, pos = durChapterPos,
+                        extra = "chapter=${chapter.index} available=$available resetPageOffset=$resetPageOffset"
+                    )
                     if (upContent) callBack?.upContent(offset, !available && resetPageOffset)
                     curPageChanged()
                     callBack?.contentLoadFinish()
@@ -968,6 +995,11 @@ object ReadBook : CoroutineScope by MainScope() {
                         }
                         callBack?.onLayoutPageCompleted(index, page)
                     }
+                    ReadProgressLog.log(
+                        "POSITION_APPLY", book,
+                        index = durChapterIndex, pos = durChapterPos,
+                        extra = "chapter=${chapter.index} available=$available resetPageOffset=$resetPageOffset await=true"
+                    )
                     if (upContent) callBack?.upContent(offset, !available && resetPageOffset)
                     curPageChanged()
                     callBack?.contentLoadFinish()
@@ -1016,6 +1048,11 @@ object ReadBook : CoroutineScope by MainScope() {
         WebBook.getChapterList(this, bookSource, book).onSuccess(IO) { cList ->
             ensureActive()
             if (cList.size > chapterSize) {
+                ReadProgressLog.log(
+                    "TOC_PERSIST", book,
+                    index = book.durChapterIndex, pos = book.durChapterPos,
+                    extra = "memIdx=$durChapterIndex memPos=$durChapterPos size=${cList.size}"
+                )
                 if (oldBook.bookUrl == book.bookUrl) {
                     appDb.bookDao.update(book)
                 } else {
@@ -1050,6 +1087,15 @@ object ReadBook : CoroutineScope by MainScope() {
                 book.durChapterTime = System.currentTimeMillis()
                 lastSaveTime = book.durChapterTime
                 val chapterChanged = book.durChapterIndex != durChapterIndex
+                // [诊断] persistedIdx/persistedPos 是落库前 book 上的旧值,
+                // 若内存位置(新值)小于它,说明保存之前内存已被回退
+                ReadProgressLog.log(
+                    "SAVE_READ", book,
+                    index = durChapterIndex, pos = durChapterPos,
+                    extra = "pageChanged=$pageChanged chapterChanged=$chapterChanged " +
+                            "persistedIdx=${book.durChapterIndex} persistedPos=${book.durChapterPos}",
+                    intoAppLog = !pageChanged || chapterChanged
+                )
                 book.durChapterIndex = durChapterIndex
                 book.durChapterPos = durChapterPos
                 if (!pageChanged || chapterChanged) {
@@ -1061,8 +1107,15 @@ object ReadBook : CoroutineScope by MainScope() {
                     }
                 }
                 appDb.bookDao.update(book)
+                ReadProgressLog.log(
+                    "PERSIST", book,
+                    index = book.durChapterIndex, pos = book.durChapterPos,
+                    extra = "time=${book.durChapterTime}",
+                    intoAppLog = !pageChanged || chapterChanged
+                )
             }.onFailure {
                 AppLog.put("保存书籍阅读进度信息出错\n$it", it)
+                ReadProgressLog.log("PERSIST_FAIL", book, index = durChapterIndex, pos = durChapterPos)
             }
         }
     }
@@ -1117,7 +1170,14 @@ object ReadBook : CoroutineScope by MainScope() {
             if (simulatedChapterSize > 0 && durChapterIndex > simulatedChapterSize - 1) {
                 durChapterIndex = simulatedChapterSize - 1
             }
-            if (isStaleProgress(newBook.bookUrl, newBook.durChapterTime, oldBook?.bookUrl, lastSaveTime)) {
+            val stale = isStaleProgress(newBook.bookUrl, newBook.durChapterTime, oldBook?.bookUrl, lastSaveTime)
+            ReadProgressLog.log(
+                "TOC_UPDATED", newBook,
+                index = durChapterIndex, pos = durChapterPos,
+                extra = "newBookIdx=${newBook.durChapterIndex} newBookPos=${newBook.durChapterPos} " +
+                        "time=${newBook.durChapterTime} lastSaveTime=$lastSaveTime stale=$stale"
+            )
+            if (stale) {
                 // 目录更新流程持有的是更新前的书籍快照,把最新阅读位置抄写回去,避免旧进度落库
                 AppLog.put(
                     "目录更新拦截旧进度《${newBook.name}》:" +
