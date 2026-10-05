@@ -56,6 +56,21 @@ import java.io.FileNotFoundException
 import java.io.FileOutputStream
 
 /**
+ * 判断"云端数值超前"的进度是否应静默应用到本地(仅用于自动同步分支)。
+ * 章节号/位置超前但 durChapterTime 不比本地新的,是历史遗留的冻结云端进度
+ * (例如 debug 包上传被禁、云端停留在旧位置),应用它会把本地较新的阅读位置拉回去。
+ * remote.durChapterTime <= 0 为无时间的旧格式云端数据,保持原有行为(应用)。
+ */
+internal fun shouldApplyRemoteProgress(remote: BookProgress, local: Book): Boolean {
+    val ahead = remote.durChapterIndex > local.durChapterIndex ||
+            (remote.durChapterIndex == local.durChapterIndex &&
+                    remote.durChapterPos > local.durChapterPos)
+    if (!ahead) return false
+    if (remote.durChapterTime <= 0) return true
+    return remote.durChapterTime > local.durChapterTime
+}
+
+/**
  * 阅读界面数据处理
  */
 class ReadBookViewModel(application: Application) : BaseViewModel(application) {
@@ -276,9 +291,26 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
             ) {
                 alertSync?.invoke(progress)
             } else if (progress.durChapterIndex < book.simulatedTotalChapterNum()) {
-                ReadBook.setProgress(progress)
-                AppLog.put("自动同步阅读进度成功《${book.name}》 ${progress.durChapterTitle}")
-                context.toastOnUi("已同步最新阅读进度")
+                if (shouldApplyRemoteProgress(progress, book)) {
+                    ReadBook.setProgress(progress)
+                    AppLog.put("自动同步阅读进度成功《${book.name}》 ${progress.durChapterTitle}")
+                    context.toastOnUi("已同步最新阅读进度")
+                } else {
+                    // 云端数值超前但时间更旧:历史遗留的冻结进度,静默跳过,防止反复覆盖本地新位置
+                    AppLog.put(
+                        "忽略较旧的云端阅读进度《${book.name}》:" +
+                                "云端 ${progress.durChapterIndex}/${progress.durChapterPos}" +
+                                "(${progress.durChapterTime}) " +
+                                "本地 ${book.durChapterIndex}/${book.durChapterPos}(${book.durChapterTime})"
+                    )
+                    ReadProgressLog.log(
+                        "SYNC_SKIP", book,
+                        index = book.durChapterIndex, pos = book.durChapterPos,
+                        extra = "remoteIdx=${progress.durChapterIndex} " +
+                                "remotePos=${progress.durChapterPos} " +
+                                "remoteTime=${progress.durChapterTime} localTime=${book.durChapterTime}"
+                    )
+                }
             }
         }
     }
