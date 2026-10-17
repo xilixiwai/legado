@@ -50,6 +50,7 @@ import io.legado.app.utils.isContentScheme
 import io.legado.app.utils.observeEvent
 import io.legado.app.utils.setIconCompat
 import io.legado.app.utils.showDialogFragment
+import io.legado.app.utils.startActivityForBook
 import io.legado.app.utils.startService
 import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.verificationField
@@ -83,6 +84,12 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
     private var menu: Menu? = null
     private val groupList: ArrayList<BookGroup> = arrayListOf()
     private var groupId: Long = -1
+    private val bookListState by lazy {
+        CacheBookListState { book ->
+            // 与列表展示一致:已下载章节数来自扫描到的缓存章节;本地书籍无缓存统计按 0 处理
+            viewModel.cacheChapters[book.bookUrl]?.size ?: 0
+        }
+    }
 
     private val exportDir = registerForActivityResult(HandleFileContract()) { result ->
         var isReadyPath = false
@@ -137,6 +144,10 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
 
     override fun onPrepareOptionsMenu(menu: Menu): Boolean {
         this.menu = menu
+        menu.findItem(R.id.menu_sort_default)?.isChecked =
+            bookListState.sortMode == CacheBookListState.SortMode.DEFAULT
+        menu.findItem(R.id.menu_sort_downloaded_asc)?.isChecked =
+            bookListState.sortMode == CacheBookListState.SortMode.DOWNLOADED_ASC
         upMenu()
         return super.onPrepareOptionsMenu(menu)
     }
@@ -201,6 +212,16 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
                 }
             }
 
+            R.id.menu_sort_default -> {
+                bookListState.setSortMode(CacheBookListState.SortMode.DEFAULT)
+                upBookList()
+            }
+
+            R.id.menu_sort_downloaded_asc -> {
+                bookListState.setSortMode(CacheBookListState.SortMode.DOWNLOADED_ASC)
+                upBookList()
+            }
+
             R.id.menu_export_all -> exportAll()
             R.id.menu_enable_replace -> AppConfig.exportUseReplace = !item.isChecked
             // 更改菜单状态[enableCustomExport]
@@ -261,10 +282,26 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
             ).catch {
                 AppLog.put("缓存管理界面获取书籍列表失败\n${it.localizedMessage}", it)
             }.flowOn(IO).conflate().collect { books ->
-                adapter.setItems(books)
+                // 始终保存页面默认顺序(分组排序结果),排序只作用于展示副本
+                bookListState.updateSource(books)
+                upBookList()
                 viewModel.loadCacheFiles(books)
             }
         }
+    }
+
+    private fun upBookList() {
+        adapter.setItems(bookListState.items)
+    }
+
+    /**
+     * 缓存数量变化后按最新数量校正排序。
+     * 仅重新提交展示列表,不修改下载任务、缓存文件或书籍数据。
+     */
+    private fun resortIfNeeded() {
+        if (bookListState.sortMode != CacheBookListState.SortMode.DOWNLOADED_ASC) return
+        if (bookListState.items.map { it.bookUrl } == adapter.getItems().map { it.bookUrl }) return
+        upBookList()
     }
 
     @SuppressLint("NotifyDataSetChanged")
@@ -295,6 +332,7 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
     override fun observeLiveBus() {
         viewModel.upAdapterLiveData.observe(this) {
             notifyItemChanged(it)
+            resortIfNeeded()
         }
         observeEvent<String>(EventBus.EXPORT_BOOK) {
             notifyItemChanged(it)
@@ -320,6 +358,7 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
         observeEvent<Pair<Book, BookChapter>>(EventBus.SAVE_CONTENT) { (book, chapter) ->
             viewModel.cacheChapters[book.bookUrl]?.add(chapter.url)
             notifyItemChanged(book.bookUrl)
+            resortIfNeeded()
         }
     }
 
@@ -569,6 +608,11 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
 
     override val cacheChapters: HashMap<String, HashSet<String>>
         get() = viewModel.cacheChapters
+
+    override fun openBook(book: Book) {
+        // 与书架一致:只传 bookUrl,阅读进度由 ReadBookActivity 原有机制恢复
+        startActivityForBook(book)
+    }
 
     override fun exportProgress(bookUrl: String): Int? {
         return ExportBookService.exportProgress[bookUrl]

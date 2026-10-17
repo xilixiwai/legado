@@ -77,6 +77,12 @@ class CacheAdapter(context: Context, private val callBack: CallBack) :
 
     override fun registerListener(holder: ItemViewHolder, binding: ItemDownloadBinding) {
         binding.run {
+            // 只有书名区域响应点击,复用书架的阅读页跳转方式
+            tvName.setOnClickListener {
+                getItem(holder.layoutPosition)?.let { book ->
+                    callBack.openBook(book)
+                }
+            }
             ivDownload.setOnClickListener {
                 getItem(holder.layoutPosition)?.let { book ->
                     CacheBook.cacheBookMap[book.bookUrl]?.let {
@@ -134,6 +140,7 @@ class CacheAdapter(context: Context, private val callBack: CallBack) :
 
     interface CallBack {
         val cacheChapters: HashMap<String, HashSet<String>>
+        fun openBook(book: Book)
         fun export(position: Int)
         fun exportProgress(bookUrl: String): Int?
         fun exportMsg(bookUrl: String): String?

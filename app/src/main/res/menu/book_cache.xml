@@ -21,6 +21,31 @@
     </item>
 
     <item
+        android:id="@+id/menu_sort"
+        android:icon="@drawable/ic_baseline_sort_24"
+        android:title="@string/sort"
+        app:showAsAction="always">
+
+        <menu>
+            <group
+                android:id="@+id/menu_group_sort"
+                android:checkableBehavior="single">
+
+                <item
+                    android:id="@+id/menu_sort_default"
+                    android:checked="true"
+                    android:title="@string/sort_default" />
+
+                <item
+                    android:id="@+id/menu_sort_downloaded_asc"
+                    android:title="@string/sort_by_downloaded_asc" />
+
+            </group>
+        </menu>
+
+    </item>
+
+    <item
         android:id="@+id/menu_export_all"
         android:title="@string/export_all"
         app:showAsAction="never" />
