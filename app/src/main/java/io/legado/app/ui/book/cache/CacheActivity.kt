@@ -84,9 +84,10 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
     private var menu: Menu? = null
     private val groupList: ArrayList<BookGroup> = arrayListOf()
     private var groupId: Long = -1
+    private var scrollToTopAfterNextListUpdate = false
     private val bookListState by lazy {
         CacheBookListState { book ->
-            // 与列表展示一致:已下载章节数来自扫描到的缓存章节;本地书籍无缓存统计按 0 处理
+            // 与列表展示一致:已下载章节数来自扫描到的缓存章节;本地书籍不参与该排序
             viewModel.cacheChapters[book.bookUrl]?.size ?: 0
         }
     }
@@ -132,6 +133,8 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
 
     override fun onCompatCreateOptionsMenu(menu: Menu): Boolean {
         menuInflater.inflate(R.menu.book_cache, menu)
+        this.menu = menu
+        upSortMenuChecked(menu)
         menu.iconItemOnLongClick(R.id.menu_download) {
             PopupMenu(this, it).apply {
                 inflate(R.menu.book_cache_download)
@@ -144,15 +147,13 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
 
     override fun onPrepareOptionsMenu(menu: Menu): Boolean {
         this.menu = menu
-        menu.findItem(R.id.menu_sort_default)?.isChecked =
-            bookListState.sortMode == CacheBookListState.SortMode.DEFAULT
-        menu.findItem(R.id.menu_sort_downloaded_asc)?.isChecked =
-            bookListState.sortMode == CacheBookListState.SortMode.DOWNLOADED_ASC
+        upSortMenuChecked(menu)
         upMenu()
         return super.onPrepareOptionsMenu(menu)
     }
 
     override fun onMenuOpened(featureId: Int, menu: Menu): Boolean {
+        upSortMenuChecked(menu)
         menu.findItem(R.id.menu_enable_replace)?.isChecked = AppConfig.exportUseReplace
         // 菜单打开时读取状态[enableCustomExport]
         menu.findItem(R.id.menu_enable_custom_export)?.isChecked = AppConfig.enableCustomExport
@@ -174,6 +175,35 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
                 subMenu.add(R.id.menu_group, bookGroup.order, Menu.NONE, bookGroup.groupName)
             }
         }
+    }
+
+    /**
+     * 菜单勾选状态必须与真实排序模式保持一致。
+     * 注意:单选组内对未选中项执行 isChecked = false 会触发
+     * MenuBuilder.setExclusiveItemChecked,反而把它选中;
+     * 因此只把目标项设为 true,由单选组自动取消另一项。
+     */
+    private fun upSortMenuChecked(menu: Menu? = this.menu) {
+        val checkedItemId =
+            if (bookListState.sortMode == CacheBookListState.SortMode.DOWNLOADED_ASC) {
+                R.id.menu_sort_downloaded_asc
+            } else {
+                R.id.menu_sort_default
+            }
+        menu?.findItem(checkedItemId)?.isChecked = true
+    }
+
+    /**
+     * 用户主动切换排序:同步菜单勾选,并在列表 diff 应用后回到顶部。
+     * 排序模式没有变化时不重复提交列表,也不回顶。
+     */
+    private fun selectSortMode(mode: CacheBookListState.SortMode) {
+        val changed = bookListState.sortMode != mode
+        bookListState.setSortMode(mode)
+        upSortMenuChecked()
+        if (!changed) return
+        scrollToTopAfterNextListUpdate = true
+        adapter.setItems(bookListState.items)
     }
 
     /**
@@ -212,15 +242,11 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
                 }
             }
 
-            R.id.menu_sort_default -> {
-                bookListState.setSortMode(CacheBookListState.SortMode.DEFAULT)
-                upBookList()
-            }
+            R.id.menu_sort_default ->
+                selectSortMode(CacheBookListState.SortMode.DEFAULT)
 
-            R.id.menu_sort_downloaded_asc -> {
-                bookListState.setSortMode(CacheBookListState.SortMode.DOWNLOADED_ASC)
-                upBookList()
-            }
+            R.id.menu_sort_downloaded_asc ->
+                selectSortMode(CacheBookListState.SortMode.DOWNLOADED_ASC)
 
             R.id.menu_export_all -> exportAll()
             R.id.menu_enable_replace -> AppConfig.exportUseReplace = !item.isChecked
@@ -255,6 +281,13 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
         binding.recyclerView.layoutManager = layoutManager
         binding.recyclerView.adapter = adapter
         binding.recyclerView.applyNavigationBarPadding()
+        adapter.onListChanged = {
+            // 只在用户主动切换排序并且列表 diff 已应用后回顶
+            if (scrollToTopAfterNextListUpdate) {
+                scrollToTopAfterNextListUpdate = false
+                binding.recyclerView.scrollToPosition(0)
+            }
+        }
     }
 
     private fun initBookData() {

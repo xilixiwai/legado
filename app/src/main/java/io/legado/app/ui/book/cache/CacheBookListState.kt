@@ -1,6 +1,7 @@
 package io.legado.app.ui.book.cache
 
 import io.legado.app.data.entities.Book
+import io.legado.app.help.book.isLocal
 
 /**
  * 缓存/导出页的列表展示状态。
@@ -41,10 +42,14 @@ class CacheBookListState(
     }
 
     private fun sortByDownloadedAsc(books: List<Book>): List<Book> {
-        // 数量相同时用原索引兜底,保证排序稳定,不会无意义地打乱相对顺序。
-        return books.withIndex()
+        // 本地书籍没有缓存章节统计,不参与下载数排序,统一放在末尾
+        val (networkBooks, localBooks) = books.partition { !it.isLocal }
+        // 数量相同时用网络书籍在原列表中的索引兜底,保证稳定且有意义的相对顺序。
+        val sortedNetworkBooks = networkBooks.withIndex()
             .sortedWith(compareBy({ downloadedCount(it.value) }, { it.index }))
             .map { it.value }
+        // 本地书籍保持默认顺序中的相对顺序,不做二次排序。
+        return sortedNetworkBooks + localBooks
     }
 
     enum class SortMode {

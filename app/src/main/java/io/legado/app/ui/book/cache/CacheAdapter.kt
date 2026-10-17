@@ -19,6 +19,16 @@ import io.legado.app.utils.visible
 class CacheAdapter(context: Context, private val callBack: CallBack) :
     DiffRecyclerAdapter<Book, ItemDownloadBinding>(context) {
 
+    /**
+     * 列表 diff 应用完成后的回调,用于排序切换后回到顶部。
+     */
+    var onListChanged: (() -> Unit)? = null
+
+    override fun onCurrentListChanged() {
+        super.onCurrentListChanged()
+        onListChanged?.invoke()
+    }
+
     override val diffItemCallback: DiffUtil.ItemCallback<Book>
         get() = object : DiffUtil.ItemCallback<Book>() {
             override fun areItemsTheSame(oldItem: Book, newItem: Book): Boolean {
@@ -43,6 +53,8 @@ class CacheAdapter(context: Context, private val callBack: CallBack) :
         payloads: MutableList<Any>
     ) {
         binding.run {
+            // 记录当前绑定的书籍,避免异步 diff/排序后按位置取到失效或错误的书籍
+            tvName.tag = item
             if (payloads.isEmpty()) {
                 tvName.text = item.name
                 tvAuthor.text = context.getString(R.string.author_show, item.getRealAuthor())
@@ -77,11 +89,16 @@ class CacheAdapter(context: Context, private val callBack: CallBack) :
 
     override fun registerListener(holder: ItemViewHolder, binding: ItemDownloadBinding) {
         binding.run {
+            // 先清空绑定数据,convert 时再写入当前书籍,避免复用瞬间点到上一本书
+            tvName.tag = null
             // 只有书名区域响应点击,复用书架的阅读页跳转方式
             tvName.setOnClickListener {
-                getItem(holder.layoutPosition)?.let { book ->
-                    callBack.openBook(book)
+                val book = (tvName.tag as? Book) ?: let {
+                    // 理论上 tag 在 convert 时已写入,这里仅作兜底
+                    val position = holder.bindingAdapterPosition
+                    if (position >= 0) getItem(position) else null
                 }
+                book?.let { callBack.openBook(it) }
             }
             ivDownload.setOnClickListener {
                 getItem(holder.layoutPosition)?.let { book ->
