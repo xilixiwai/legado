@@ -87,7 +87,7 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
     private var scrollToTopAfterNextListUpdate = false
     private val bookListState by lazy {
         CacheBookListState { book ->
-            // 与列表展示一致:已下载章节数来自扫描到的缓存章节;本地书籍不参与该排序
+            // 与列表展示一致:已缓存章节数来自扫描到的缓存章节,用于判断是否下载完成
             viewModel.cacheChapters[book.bookUrl]?.size ?: 0
         }
     }
@@ -185,8 +185,8 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
      */
     private fun upSortMenuChecked(menu: Menu? = this.menu) {
         val checkedItemId =
-            if (bookListState.sortMode == CacheBookListState.SortMode.DOWNLOADED_ASC) {
-                R.id.menu_sort_downloaded_asc
+            if (bookListState.sortMode == CacheBookListState.SortMode.INCOMPLETE_FIRST) {
+                R.id.menu_sort_incomplete_first
             } else {
                 R.id.menu_sort_default
             }
@@ -245,8 +245,8 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
             R.id.menu_sort_default ->
                 selectSortMode(CacheBookListState.SortMode.DEFAULT)
 
-            R.id.menu_sort_downloaded_asc ->
-                selectSortMode(CacheBookListState.SortMode.DOWNLOADED_ASC)
+            R.id.menu_sort_incomplete_first ->
+                selectSortMode(CacheBookListState.SortMode.INCOMPLETE_FIRST)
 
             R.id.menu_export_all -> exportAll()
             R.id.menu_enable_replace -> AppConfig.exportUseReplace = !item.isChecked
@@ -330,11 +330,11 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
     }
 
     /**
-     * 缓存数量变化后按最新数量校正排序。
+     * 缓存章节数量变化后按最新完成状态校正排序。
      * 仅重新提交展示列表,不修改下载任务、缓存文件或书籍数据。
      */
     private fun resortIfNeeded() {
-        if (bookListState.sortMode != CacheBookListState.SortMode.DOWNLOADED_ASC) return
+        if (bookListState.sortMode != CacheBookListState.SortMode.INCOMPLETE_FIRST) return
         if (bookListState.items.map { it.bookUrl } == adapter.getItems().map { it.bookUrl }) return
         upBookList()
     }

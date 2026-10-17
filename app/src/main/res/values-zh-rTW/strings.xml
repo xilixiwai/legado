@@ -356,7 +356,7 @@
     <string name="sort_default">默認排序</string>
     <string name="sort_manual">手動排序</string>
     <string name="sort_by_name">名稱排序</string>
-    <string name="sort_by_downloaded_asc">已下載數 ↑</string>
+    <string name="sort_incomplete_first">未下載完成優先</string>
     <string name="go_to_top">滾動到頂部</string>
     <string name="go_to_bottom">滾動到底部</string>
     <string name="read_y">已讀：%s</string>

@@ -357,7 +357,7 @@
     <string name="sort_manual">Sắp xếp thủ công</string>
     <string name="sort_default">Sắp xếp mặc định</string>
     <string name="sort_by_name">Sắp xếp theo tên</string>
-    <string name="sort_by_downloaded_asc">Đã tải ↑</string>
+    <string name="sort_incomplete_first">Chưa tải xong trước</string>
     <string name="go_to_top">Cuộn lên đầu</string>
     <string name="go_to_bottom">Cuộn xuống cuối</string>
     <string name="read_y">Đã đọc: %s</string>

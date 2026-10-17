@@ -37,8 +37,8 @@
                     android:title="@string/sort_default" />
 
                 <item
-                    android:id="@+id/menu_sort_downloaded_asc"
-                    android:title="@string/sort_by_downloaded_asc" />
+                    android:id="@+id/menu_sort_incomplete_first"
+                    android:title="@string/sort_incomplete_first" />
 
             </group>
         </menu>

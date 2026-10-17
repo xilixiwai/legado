@@ -360,7 +360,7 @@
     <string name="sort_default">Ordenar por defecto</string>
     <string name="sort_manual">Ordenar manualmente</string>
     <string name="sort_by_name">Ordenar por nome</string>
-    <string name="sort_by_downloaded_asc">Baixados ↑</string>
+    <string name="sort_incomplete_first">Incompletos primeiro</string>
     <string name="go_to_top">Vá ao topo</string>
     <string name="go_to_bottom">Vá ao final</string>
     <string name="read_y">Ler: %s</string>
