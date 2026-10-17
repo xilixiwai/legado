@@ -165,6 +165,10 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
             }
         }
         if (!book.isLocal && ReadBook.bookSource == null) {
+            // 没有书源且没有任何章节数据时,正文页给出与详情页一致的无源提示
+            if (ReadBook.chapterSize == 0) {
+                ReadBook.upMsg(context.getString(R.string.error_no_source))
+            }
             autoChangeSource(book.name, book.author)
             return
         }
@@ -203,6 +207,16 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
      */
     fun loadChapterList(book: Book) {
         execute {
+            // 无书源且没有任何章节时,更新目录也应给出明确提示,而不是清空为空白页
+            val showNoSource = shouldShowNoSourceMsg(
+                book.isLocal,
+                ReadBook.bookSource != null,
+                ReadBook.chapterSize
+            )
+            if (showNoSource) {
+                ReadBook.upMsg(context.getString(R.string.error_no_source))
+                return@execute
+            }
             if (loadChapterListAwait(book)) {
                 ReadBook.upMsg(null)
             }
@@ -386,6 +400,16 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
             }.catch {
                 AppLog.put("自动换源失败\n${it.localizedMessage}", it)
                 context.toastOnUi("自动换源失败\n${it.localizedMessage}")
+                // 自动换源失败后仍无书源且没有任何章节时,把正文页恢复为明确的“没有源”状态
+                if (ReadBook.curTextChapter == null &&
+                    shouldShowNoSourceMsg(
+                        ReadBook.isLocalBook,
+                        ReadBook.bookSource != null,
+                        ReadBook.chapterSize
+                    )
+                ) {
+                    ReadBook.upMsg(context.getString(R.string.error_no_source))
+                }
             }.collect()
         }
     }
