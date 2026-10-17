@@ -280,6 +280,8 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
     private fun initRecyclerView() {
         binding.recyclerView.layoutManager = layoutManager
         binding.recyclerView.adapter = adapter
+        // 复用书架同款快速滚动条:滚动时显示,空闲时淡出,短列表不会常驻
+        binding.recyclerView.setFastScrollEnabled(true)
         binding.recyclerView.applyNavigationBarPadding()
         adapter.onListChanged = {
             // 只在用户主动切换排序并且列表 diff 已应用后回顶
