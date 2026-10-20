@@ -487,6 +487,7 @@
     <string name="files_tree">Carpeta</string>
     <string name="intelligent_import">Importación inteligente</string>
     <string name="discovery">Descubrir</string>
+    <string name="explore_debug_response">Ver respuesta</string>
     <string name="switch_display_style">Cambiar modo de visualización</string>
     <string name="import_per">La importación de libros locales requiere permiso de almacenamiento</string>
     <string name="night_theme">Tema nocturno</string>

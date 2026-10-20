@@ -485,6 +485,7 @@
     <string name="files_tree">手機目錄</string>
     <string name="intelligent_import">智慧匯入</string>
     <string name="discovery">發現</string>
+    <string name="explore_debug_response">查看網頁返回</string>
     <string name="switch_display_style">切換顯示樣式</string>
     <string name="import_per">匯入本機書籍需儲存權限</string>
     <string name="night_theme">夜間模式</string>

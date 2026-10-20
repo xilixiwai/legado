@@ -485,6 +485,7 @@
     <string name="files_tree">Thư mục</string>
     <string name="intelligent_import">Nhập thông minh</string>
     <string name="discovery">Khám phá</string>
+    <string name="explore_debug_response">Xem phản hồi</string>
     <string name="switch_display_style">Chuyển đổi kiểu hiển thị</string>
     <string name="import_per">Nhập sách cục bộ cần quyền truy cập bộ nhớ</string>
     <string name="night_theme">Chủ đề tối</string>

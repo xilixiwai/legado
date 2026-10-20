@@ -491,6 +491,7 @@
     <string name="files_tree">Directory</string>
     <string name="intelligent_import">Intelligent import</string>
     <string name="discovery">Discovery</string>
+    <string name="explore_debug_response">View response</string>
     <string name="switch_display_style">Switch display styles</string>
     <string name="import_per">Import local books requires storage permission</string>
     <string name="night_theme">Night Theme</string>

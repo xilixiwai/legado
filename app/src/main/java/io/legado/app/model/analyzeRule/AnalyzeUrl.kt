@@ -115,6 +115,9 @@ class AnalyzeUrl(
     private var webViewDelayTime: Long = 0
     private val concurrentRateLimiter = ConcurrentRateLimiter(source)
 
+    val requestMethodName: String get() = method.name
+    val requestModeName: String get() = if (useWebView) "WebView" else "HTTP"
+
     // 服务器ID
     var serverID: Long? = null
         private set

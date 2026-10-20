@@ -1,6 +1,8 @@
 package io.legado.app.ui.book.explore
 
 import android.os.Bundle
+import android.view.Menu
+import android.view.MenuItem
 import androidx.activity.viewModels
 import androidx.core.os.bundleOf
 import androidx.recyclerview.widget.RecyclerView
@@ -10,10 +12,13 @@ import io.legado.app.data.entities.SearchBook
 import io.legado.app.databinding.ActivityExploreShowBinding
 import io.legado.app.databinding.ViewLoadMoreBinding
 import io.legado.app.ui.book.info.BookInfoActivity
+import io.legado.app.ui.widget.dialog.TextDialog
 import io.legado.app.ui.widget.recycler.LoadMoreView
 import io.legado.app.ui.widget.recycler.VerticalDivider
 import io.legado.app.utils.applyNavigationBarPadding
+import io.legado.app.utils.showDialogFragment
 import io.legado.app.utils.startActivity
+import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
 
 /**
@@ -38,6 +43,44 @@ class ExploreShowActivity : VMBaseActivity<ActivityExploreShowBinding, ExploreSh
         viewModel.upAdapterLiveData.observe(this) {
             adapter.notifyItemRangeChanged(0, adapter.itemCount, bundleOf(it to null))
         }
+        viewModel.debugInfoLiveData.observe(this) {
+            invalidateOptionsMenu()
+        }
+    }
+
+    override fun onCompatCreateOptionsMenu(menu: Menu): Boolean {
+        menuInflater.inflate(R.menu.explore_show, menu)
+        return super.onCompatCreateOptionsMenu(menu)
+    }
+
+    override fun onPrepareOptionsMenu(menu: Menu): Boolean {
+        menu.findItem(R.id.menu_explore_debug)?.isEnabled =
+            viewModel.debugInfoLiveData.value != null
+        return super.onPrepareOptionsMenu(menu)
+    }
+
+    override fun onCompatOptionsItemSelected(item: MenuItem): Boolean {
+        when (item.itemId) {
+            R.id.menu_explore_debug -> showExploreDebug()
+            else -> return super.onCompatOptionsItemSelected(item)
+        }
+        return true
+    }
+
+    private fun showExploreDebug() {
+        val debugInfo = viewModel.debugInfoLiveData.value
+        if (debugInfo == null) {
+            toastOnUi("暂无发现请求数据，请等待请求完成")
+            return
+        }
+        showDialogFragment(
+            TextDialog(
+                title = getString(R.string.explore_debug_response),
+                content = ExploreDebugFormatter.format(debugInfo),
+                copyable = true,
+                maxDisplayChars = 80_000,
+            )
+        )
     }
 
     private fun initRecyclerView() {

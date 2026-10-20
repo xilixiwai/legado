@@ -17,11 +17,14 @@ import io.legado.app.model.analyzeRule.AnalyzeRule
 import io.legado.app.model.analyzeRule.AnalyzeRule.Companion.setCoroutineContext
 import io.legado.app.model.analyzeRule.AnalyzeUrl
 import io.legado.app.model.analyzeRule.RuleData
+import io.legado.app.utils.DiagnosticUtils
+import io.legado.app.utils.ExploreDebugRedactor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
+import okhttp3.Headers
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.coroutineContext
 
@@ -96,9 +99,11 @@ object WebBook {
         url: String,
         page: Int? = 1,
         context: CoroutineContext = Dispatchers.IO,
+        exploreName: String = "",
+        debugCallback: ((ExploreDebugInfo) -> Unit)? = null,
     ): Coroutine<List<SearchBook>> {
         return Coroutine.async(scope, context) {
-            exploreBookAwait(bookSource, url, page)
+            exploreBookAwait(bookSource, url, page, exploreName, debugCallback)
         }
     }
 
@@ -106,32 +111,205 @@ object WebBook {
         bookSource: BookSource,
         url: String,
         page: Int? = 1,
+        exploreName: String = "",
+        debugCallback: ((ExploreDebugInfo) -> Unit)? = null,
     ): ArrayList<SearchBook> {
         val ruleData = RuleData()
-        val analyzeUrl = AnalyzeUrl(
-            mUrl = url,
-            page = page,
-            baseUrl = bookSource.bookSourceUrl,
-            source = bookSource,
-            ruleData = ruleData,
-            coroutineContext = coroutineContext
-        )
-        var res = analyzeUrl.getStrResponseAwait()
-        //检测书源是否已登录
-        bookSource.loginCheckJs?.let { checkJs ->
-            if (checkJs.isNotBlank()) {
-                res = analyzeUrl.evalJS(checkJs, result = res) as StrResponse
+        val analyzeUrl = try {
+            AnalyzeUrl(
+                mUrl = url,
+                page = page,
+                baseUrl = bookSource.bookSourceUrl,
+                source = bookSource,
+                ruleData = ruleData,
+                coroutineContext = coroutineContext
+            )
+        } catch (e: Throwable) {
+            debugCallback?.let { callback ->
+                runCatching {
+                    callback(
+                        ExploreDebugInfo(
+                            sourceName = bookSource.bookSourceName,
+                            sourceUrl = ExploreDebugRedactor.redactUrl(bookSource.bookSourceUrl),
+                            exploreName = exploreName,
+                            page = page ?: 1,
+                            ruleUrl = ExploreDebugRedactor.redactText(
+                                ExploreDebugRedactor.redactUrl(url)
+                            ),
+                            requestUrl = ExploreDebugRedactor.redactUrl(url),
+                            errorType = DiagnosticUtils.exceptionType(e),
+                            errorMessage = ExploreDebugRedactor.redactText(
+                                e.localizedMessage ?: e.javaClass.simpleName
+                            ),
+                            ruleUsed = exploreRuleText(bookSource)
+                        )
+                    )
+                }
             }
+            throw e
         }
-        checkRedirect(bookSource, res)
-        return BookList.analyzeBookList(
-            bookSource = bookSource,
-            ruleData = ruleData,
-            analyzeUrl = analyzeUrl,
-            baseUrl = res.url,
-            body = res.body,
-            isSearch = false
+        var response: StrResponse? = null
+        var parseStats: ExploreParseStats? = null
+        var requestElapsedMs = 0L
+        var parseElapsedMs = 0L
+        try {
+            val requestStart = System.currentTimeMillis()
+            var res = analyzeUrl.getStrResponseAwait()
+            requestElapsedMs = DiagnosticUtils.elapsedMs(requestStart)
+            response = res
+            //检测书源是否已登录
+            bookSource.loginCheckJs?.let { checkJs ->
+                if (checkJs.isNotBlank()) {
+                    res = analyzeUrl.evalJS(checkJs, result = res) as StrResponse
+                    response = res
+                }
+            }
+            checkRedirect(bookSource, res)
+            val parseStart = System.currentTimeMillis()
+            val books = BookList.analyzeBookList(
+                bookSource = bookSource,
+                ruleData = ruleData,
+                analyzeUrl = analyzeUrl,
+                baseUrl = res.url,
+                body = res.body,
+                isSearch = false,
+                parseCallback = { parseStats = it }
+            )
+            parseElapsedMs = DiagnosticUtils.elapsedMs(parseStart)
+            debugCallback?.let { callback ->
+                runCatching {
+                    callback(
+                        buildExploreDebugInfo(
+                            bookSource = bookSource,
+                            exploreName = exploreName,
+                            page = page,
+                            analyzeUrl = analyzeUrl,
+                            response = response,
+                            requestElapsedMs = requestElapsedMs,
+                            parseElapsedMs = parseElapsedMs,
+                            parseStats = parseStats,
+                            books = books,
+                            error = null
+                        )
+                    )
+                }
+            }
+            return books
+        } catch (e: Throwable) {
+            debugCallback?.let { callback ->
+                runCatching {
+                    callback(
+                        buildExploreDebugInfo(
+                            bookSource = bookSource,
+                            exploreName = exploreName,
+                            page = page,
+                            analyzeUrl = analyzeUrl,
+                            response = response,
+                            requestElapsedMs = requestElapsedMs,
+                            parseElapsedMs = parseElapsedMs,
+                            parseStats = parseStats,
+                            books = null,
+                            error = e
+                        )
+                    )
+                }
+            }
+            throw e
+        }
+    }
+
+    private fun buildExploreDebugInfo(
+        bookSource: BookSource,
+        exploreName: String,
+        page: Int?,
+        analyzeUrl: AnalyzeUrl,
+        response: StrResponse?,
+        requestElapsedMs: Long,
+        parseElapsedMs: Long,
+        parseStats: ExploreParseStats?,
+        books: List<SearchBook>?,
+        error: Throwable?,
+    ): ExploreDebugInfo {
+        val responseHeaders = response?.headers().orEmptyPairs()
+        val networkRequest = response?.raw?.networkResponse?.request
+        val rawRequest = networkRequest ?: response?.raw?.request
+        val requestHeaders = rawRequest?.headers?.toPairs()?.takeIf { it.isNotEmpty() }
+            ?: analyzeUrl.headerMap.map { it.key to it.value }
+        val rawRequestUrl = analyzeUrl.url.ifBlank { analyzeUrl.ruleUrl }
+        val rawFinalUrl = response?.url ?: ""
+        val redirected = response?.raw?.let { raw ->
+            generateSequence(raw.priorResponse) { it.priorResponse }.any { it.isRedirect }
+        } == true || (rawRequestUrl.isNotBlank() && rawFinalUrl.isNotBlank() &&
+            rawRequestUrl != rawFinalUrl)
+        val preview = ExploreDebugRedactor.previewBody(response?.body)
+        val cookieSent = requestHeaders.any { (name, value) ->
+            name.equals("Cookie", true) && value.isNotBlank()
+        }
+        val setCookieReceived = response?.raw?.let { raw ->
+            generateSequence(raw) { it.priorResponse }.any { responseInChain ->
+                responseInChain.headers.values("Set-Cookie").any { it.isNotBlank() }
+            }
+        } == true
+        return ExploreDebugInfo(
+            sourceName = bookSource.bookSourceName,
+            sourceUrl = ExploreDebugRedactor.redactUrl(bookSource.bookSourceUrl),
+            exploreName = exploreName,
+            page = page ?: 1,
+            ruleUrl = ExploreDebugRedactor.redactText(
+                ExploreDebugRedactor.redactUrl(analyzeUrl.ruleUrl)
+            ),
+            requestUrl = ExploreDebugRedactor.redactUrl(rawRequestUrl),
+            finalUrl = ExploreDebugRedactor.redactUrl(rawFinalUrl),
+            method = analyzeUrl.requestMethodName,
+            requestMode = analyzeUrl.requestModeName,
+            statusCode = response?.code() ?: 0,
+            statusMessage = ExploreDebugRedactor.redactText(response?.message() ?: ""),
+            requestElapsedMs = requestElapsedMs,
+            parseElapsedMs = parseElapsedMs,
+            redirected = redirected,
+            requestHeaders = ExploreDebugRedactor.redactHeaders(requestHeaders),
+            responseHeaders = ExploreDebugRedactor.redactHeaders(responseHeaders),
+            cookieSent = cookieSent,
+            cookieJarEnabled = bookSource.enabledCookieJar == true,
+            setCookieReceived = setCookieReceived,
+            contentType = response?.headers()?.get("Content-Type")
+                ?: if (analyzeUrl.requestModeName == "WebView") "WebView 未提供响应头" else "",
+            body = preview.text,
+            bodyLength = preview.originalLength,
+            bodyTruncated = preview.truncated,
+            errorType = error?.let { DiagnosticUtils.exceptionType(it) },
+            errorMessage = error?.let {
+                ExploreDebugRedactor.redactText(it.localizedMessage ?: it.javaClass.simpleName)
+            },
+            ruleUsed = parseStats?.rule ?: exploreRuleText(bookSource),
+            collectionCount = parseStats?.collectionCount ?: -1,
+            resultCount = parseStats?.resultCount ?: books?.size ?: 0,
+            resultPreview = exploreResultPreview(books)
         )
+    }
+
+    private fun exploreRuleText(bookSource: BookSource): String {
+        val exploreRule = bookSource.getExploreRule()
+        return if (exploreRule.bookList.isNullOrBlank()) {
+            bookSource.getSearchRule().bookList.orEmpty()
+        } else {
+            exploreRule.bookList.orEmpty()
+        }
+    }
+
+    private fun exploreResultPreview(books: List<SearchBook>?): String {
+        if (books.isNullOrEmpty()) return ""
+        return books.take(5).joinToString("\n") {
+            "${it.name} / ${it.author} / ${ExploreDebugRedactor.redactUrl(it.bookUrl)}"
+        }.take(1000)
+    }
+
+    private fun Headers.toPairs(): List<Pair<String, String>> {
+        return names().flatMap { name -> values(name).map { name to it } }
+    }
+
+    private fun Headers?.orEmptyPairs(): List<Pair<String, String>> {
+        return this?.toPairs().orEmpty()
     }
 
     /**

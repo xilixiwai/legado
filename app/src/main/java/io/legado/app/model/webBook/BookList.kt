@@ -41,7 +41,8 @@ object BookList {
         isSearch: Boolean = true,
         isRedirect: Boolean = false,
         filter: ((name: String, author: String) -> Boolean)? = null,
-        shouldBreak: ((size: Int) -> Boolean)? = null
+        shouldBreak: ((size: Int) -> Boolean)? = null,
+        parseCallback: ((ExploreParseStats) -> Unit)? = null,
     ): ArrayList<SearchBook> {
         body ?: throw NoStackTraceException(
             appCtx.getString(
@@ -76,6 +77,13 @@ object BookList {
                     searchBook.infoHtml = body
                     bookList.add(searchBook)
                 }
+                parseCallback?.invoke(
+                    ExploreParseStats(
+                        rule = bookSource.bookUrlPattern ?: "",
+                        collectionCount = 0,
+                        resultCount = bookList.size
+                    )
+                )
                 return bookList
             }
         }
@@ -106,6 +114,13 @@ object BookList {
                 searchBook.infoHtml = body
                 bookList.add(searchBook)
             }
+            parseCallback?.invoke(
+                ExploreParseStats(
+                    rule = ruleList,
+                    collectionCount = 0,
+                    resultCount = bookList.size
+                )
+            )
         } else {
             val ruleName = analyzeRule.splitSourceRule(bookListRule.name)
             val ruleBookUrl = analyzeRule.splitSourceRule(bookListRule.bookUrl)
@@ -145,6 +160,13 @@ object BookList {
             if (reverse) {
                 bookList.reverse()
             }
+            parseCallback?.invoke(
+                ExploreParseStats(
+                    rule = ruleList,
+                    collectionCount = collections.size,
+                    resultCount = bookList.size
+                )
+            )
         }
         Debug.log(bookSource.bookSourceUrl, "◇书籍总数:${bookList.size}")
         return bookList

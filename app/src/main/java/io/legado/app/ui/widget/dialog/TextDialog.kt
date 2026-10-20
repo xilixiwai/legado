@@ -12,6 +12,7 @@ import io.legado.app.databinding.DialogTextViewBinding
 import io.legado.app.help.IntentData
 import io.legado.app.lib.theme.primaryColor
 import io.legado.app.utils.applyTint
+import io.legado.app.utils.sendToClip
 import io.legado.app.utils.setHtml
 import io.legado.app.utils.setLayout
 import io.legado.app.utils.viewbindingdelegate.viewBinding
@@ -36,13 +37,17 @@ class TextDialog() : BaseDialogFragment(R.layout.dialog_text_view) {
         content: String?,
         mode: Mode = Mode.TEXT,
         time: Long = 0,
-        autoClose: Boolean = false
+        autoClose: Boolean = false,
+        copyable: Boolean = false,
+        maxDisplayChars: Int = 32 * 1024,
     ) : this() {
         arguments = Bundle().apply {
             putString("title", title)
             putString("content", IntentData.put(content))
             putString("mode", mode.name)
             putLong("time", time)
+            putBoolean("copyable", copyable)
+            putInt("maxDisplayChars", maxDisplayChars)
         }
         isCancelable = false
         this.autoClose = autoClose
@@ -51,6 +56,7 @@ class TextDialog() : BaseDialogFragment(R.layout.dialog_text_view) {
     private val binding by viewBinding(DialogTextViewBinding::bind)
     private var time = 0L
     private var autoClose: Boolean = false
+    private var copyContent: String = ""
 
     override fun onStart() {
         super.onStart()
@@ -61,8 +67,11 @@ class TextDialog() : BaseDialogFragment(R.layout.dialog_text_view) {
         binding.toolBar.setBackgroundColor(primaryColor)
         binding.toolBar.inflateMenu(R.menu.dialog_text)
         binding.toolBar.menu.applyTint(requireContext())
+        binding.toolBar.menu.findItem(R.id.menu_copy)?.isVisible =
+            arguments?.getBoolean("copyable", false) == true
         binding.toolBar.setOnMenuItemClickListener {
             when (it.itemId) {
+                R.id.menu_copy -> requireContext().sendToClip(copyContent)
                 R.id.menu_close -> dismissAllowingStateLoss()
             }
             true
@@ -70,6 +79,7 @@ class TextDialog() : BaseDialogFragment(R.layout.dialog_text_view) {
         arguments?.let {
             binding.toolBar.title = it.getString("title")
             val content = IntentData.get(it.getString("content")) ?: ""
+            copyContent = content
             when (it.getString("mode")) {
                 Mode.MD.name -> viewLifecycleOwner.lifecycleScope.launch {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -89,9 +99,10 @@ class TextDialog() : BaseDialogFragment(R.layout.dialog_text_view) {
 
                 Mode.HTML.name -> binding.textView.setHtml(content)
                 else -> {
-                    if (content.length >= 32 * 1024) {
+                    val maxDisplayChars = it.getInt("maxDisplayChars", 32 * 1024)
+                    if (content.length >= maxDisplayChars) {
                         val truncatedContent =
-                            content.substring(0, 32 * 1024) + "\n\n数据太大，无法全部显示…"
+                            content.substring(0, maxDisplayChars) + "\n\n数据太大，无法全部显示…"
                         binding.textView.text = truncatedContent
                     } else {
                         binding.textView.text = content
