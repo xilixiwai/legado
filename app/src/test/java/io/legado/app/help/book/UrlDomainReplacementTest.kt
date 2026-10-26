@@ -224,6 +224,75 @@ class UrlDomainReplacementTest {
         assertFalse(r.matchesHost("img.old.com"))
     }
 
+    // ------------------------------------------------------------------ 完整网址形式的旧域名
+
+    @Test
+    fun `真机用例_完整网址形式的正则提取主机名后参与整串匹配`() {
+        // 真机排查：输入 https://www.banzhu\d*.net 提示零匹配，而库中存在
+        // www.banzhu222222222.net / www.banzhu111111111.net / www.banzhu9999999.net。
+        // 根因：正则只作用于纯主机名，模式里的 https:// 前缀永远整串失配。
+        // 修复：先提取网址的主机名部分，再按「字面量 or 正则」分类。
+        val r = rule("https://www.banzhu\\d*.net", "gpt2.example.com")
+        assertFalse(r.literal)
+        assertEquals("www.banzhu\\d*.net", r.pattern)
+        assertTrue(r.matchesHost("www.banzhu222222222.net"))
+        assertTrue(r.matchesHost("www.banzhu111111111.net"))
+        assertTrue(r.matchesHost("www.banzhu9999999.net"))
+        assertFalse(r.matchesHost("www.other-site.net"))
+        // 整串匹配语义不变：缺 www 前缀的主机名不命中
+        assertFalse(r.matchesHost("banzhu222222222.net"))
+        // 展示仍用原始输入
+        assertEquals("https://www.banzhu\\d*.net", r.oldInput)
+    }
+
+    @Test
+    fun `完整网址形式的普通域名按字面量处理`() {
+        val r = rule("https://www.banzhu222222222.net", "new.com")
+        assertTrue(r.literal)
+        assertTrue(r.matchesHost("www.banzhu222222222.net"))
+        // 字面量语义不变：不是前缀通配
+        assertFalse(r.matchesHost("www.banzhu22.net"))
+        assertFalse(r.matchesHost("www.banzhu222222222.net.evil.com"))
+    }
+
+    @Test
+    fun `完整网址的路径查询片段与端口不参与主机名匹配`() {
+        val r = rule("https://www.banzhu\\d*.net/book/1?x=2#f", "new.com")
+        assertEquals("www.banzhu\\d*.net", r.pattern)
+        assertTrue(r.matchesHost("www.banzhu123.net"))
+
+        val withPort = rule("https://www.banzhu222222222.net:8080", "new.com")
+        assertTrue(withPort.literal)
+        assertTrue(withPort.matchesHost("www.banzhu222222222.net"))
+        // 数据行带端口时：只换主机名，端口原样保留
+        assertEquals(
+            "http://new.com:8080/x",
+            UrlDomainReplacement.replaceDomain("http://www.banzhu222222222.net:8080/x", withPort)
+        )
+    }
+
+    @Test
+    fun `完整网址形式与新域名相同时拒绝`() {
+        // https://old.com 与 new.com=old.com 是同一主机，替换是无操作
+        assertEquals(InvalidReason.SAME_AS_NEW_DOMAIN, failureReason("https://old.com", "old.com"))
+        assertEquals(InvalidReason.SAME_AS_NEW_DOMAIN, failureReason("http://old.com/", "old.com"))
+    }
+
+    @Test
+    fun `完整网址形式的主机名部分仍受正则安全检查约束`() {
+        // 危险正则写在主机名部分照样拦截
+        assertEquals(InvalidReason.INVALID_OLD_REGEX, failureReason("https://[", "new.com"))
+        assertEquals(InvalidReason.OLD_REGEX_TOO_BROAD, failureReason("https://.*", "new.com"))
+    }
+
+    @Test
+    fun `非 http(s) 网址形式的输入维持原样`() {
+        // ftp 等协议不在替换引擎的地址解析范围内，不做主机名提取，行为与历史版本一致
+        val r = rule("ftp://a.com/x", "new.com")
+        assertFalse(r.literal)
+        assertEquals("ftp://a.com/x", r.pattern)
+    }
+
     // ------------------------------------------------------------------ URL 替换：scheme / 端口 / 路径 / 查询 / 片段
 
     @Test

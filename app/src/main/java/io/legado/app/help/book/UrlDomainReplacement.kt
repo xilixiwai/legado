@@ -9,7 +9,9 @@ import java.util.regex.PatternSyntaxException
  * 1. **旧域名支持正则**：正则只对「解析出来的完整主机名」做匹配（`Regex.matches`，整串匹配），
  *    绝不拿正则去扫整条 URL，因此不会误伤路径 / 查询 / 片段里恰好出现的域名文本。
  * 2. 输入若是一个裸主机名（只含 `[a-z0-9._-]`），自动按**字面量**转义，
- *    避免 `old.com` 里的 `.` 被当成通配符去匹配 `oldXcom`。
+ *    避免 `old.com` 里的 `.` 被当成通配符去匹配 `oldXcom`；
+ *    输入若是绝对 http(s) 网址（如 `https://www.banzhu\d*.net`），先提取主机名部分
+ *    再参与分类——匹配对象是纯主机名，模式里带着 scheme / 路径永远整串失配。
  * 3. 匹配到的主机名**整段替换**为固定新域名，不做前缀保留、不做捕获组替换。
  * 4. 协议、userinfo、端口、路径、查询、片段、规则参数块原样保留；不自动升级 HTTP/HTTPS。
  * 5. 已经是新域名的地址返回 null（重复执行不会重复修改）。
@@ -267,7 +269,21 @@ object UrlDomainReplacement {
     }
 
     /**
-     * 规范化用户输入的旧域名（正则或裸主机名）与新域名，并把「最终生效的匹配规则」确定下来。
+     * 输入是绝对 http(s) 网址时，提取 authority 的主机名部分（保留正则元字符）；
+     * 端口随结构剥掉（数据侧匹配也只看主机名，替换时端口原样保留）。
+     * 不是网址结构、authority 为空或无法解析时返回 null。
+     */
+    private fun urlFormHostOf(input: String): String? {
+        val (body, _) = splitUrlOption(input)
+        val parts = parseHttpUrl(body) ?: return null
+        return splitAuthority(parts.authority)?.second?.takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * 规范化用户输入的旧域名与新域名，并把「最终生效的匹配规则」确定下来。
+     *
+     * 旧域名三种写法：裸主机名（按字面量）、正则（按完整主机名整串匹配）、
+     * 绝对 http(s) 网址（先提取主机名部分，再按前两者分类）。
      */
     fun normalize(oldInput: String, newInput: String): NormalizeResult {
         if (oldInput.isBlank()) return NormalizeResult.Failure(InvalidReason.EMPTY_OLD)
@@ -276,10 +292,12 @@ object UrlDomainReplacement {
             ?: return NormalizeResult.Failure(InvalidReason.INVALID_NEW)
 
         val raw = oldInput.trim()
+        // 完整网址形式的旧域名先提取主机名，再按「裸主机名 → 字面量 / 其余 → 正则」分类
+        val matchInput = urlFormHostOf(raw) ?: raw
         // 裸主机名 → 字面量转义，避免 "." 被当作通配符
-        val literalHost = raw.lowercase().trimEnd('.')
+        val literalHost = matchInput.lowercase().trimEnd('.')
         val literal = hostPattern.matches(literalHost)
-        val pattern = if (literal) Regex.escape(literalHost) else raw
+        val pattern = if (literal) Regex.escape(literalHost) else matchInput
 
         val regex = try {
             Regex(pattern)

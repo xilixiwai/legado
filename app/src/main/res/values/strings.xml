@@ -1007,9 +1007,9 @@
     <string name="change_source_batch">Batch source switching</string>
     <string name="change_source_select_source">Select book source</string>
     <string name="change_domain_title">Batch replace domain</string>
-    <string name="change_domain_old_hint">Old domain or regex, e.g. old.com or ^gpt[0-9]+[.]example[.]com$</string>
+    <string name="change_domain_old_hint">Old domain or regex (whole-host match); full URLs work too, e.g. old.com, https://www.banzhu\\d*.net, ^gpt[0-9]+[.]example[.]com$</string>
     <string name="change_domain_new_hint">New domain, e.g. new.com</string>
-    <string name="change_domain_input_tip">The old domain accepts a regular expression matched against the full parsed host name; a plain host name is matched literally. Tap a symbol below the old-domain box to insert it at the cursor. A matched host is replaced entirely by the new domain; scheme, port, path, query and fragment are preserved. The new domain is literal text; $1-style templates are not interpreted. Press Check to preview the hit count before anything is written.</string>
+    <string name="change_domain_input_tip">The old domain accepts a regular expression matched against the full parsed host name; a plain host name is matched literally, and a full URL (e.g. https://www.banzhu\\d*.net) is reduced to its host part before matching. Tap a symbol below the old-domain box to insert it at the cursor. A matched host is replaced entirely by the new domain; scheme, port, path, query and fragment are preserved. The new domain is literal text; $1-style templates are not interpreted. Press Check to preview the hit count before anything is written.</string>
     <string name="change_domain_check">Check</string>
     <string name="change_domain_empty_old">Enter the old domain or regex</string>
     <string name="change_domain_empty_new">Enter the new domain</string>
@@ -1023,7 +1023,7 @@
     <string name="change_domain_no_hits_rule">Match mode: %1$s. Effective pattern: %2$s</string>
     <string name="change_domain_no_hits_hosts">Host names present in the database (top 10 by record count):</string>
     <string name="change_domain_no_hits_host_line">· %1$s (%2$d records)</string>
-    <string name="change_domain_no_hits_hint">Compare the old-domain input with the host names above: the pattern must cover the whole host name including sub-domains, and a plain host name is treated as literal text.</string>
+    <string name="change_domain_no_hits_hint">The host names above are an inventory of what exists in the database, not match results. A regex must cover the whole host name (incl. sub-domains); a plain host name is treated as literal text; a full URL is reduced to its host part before matching.</string>
     <string name="change_domain_preview_title">Confirm replacement</string>
     <string name="change_domain_preview_header">%1$s → %2$s</string>
     <string name="change_domain_pattern">Effective rule: %1$s</string>

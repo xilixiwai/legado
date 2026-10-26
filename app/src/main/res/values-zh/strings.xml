@@ -1004,9 +1004,9 @@
     <string name="change_source_batch">批量换源</string>
     <string name="change_source_select_source">选择书源</string>
     <string name="change_domain_title">批量替换域名</string>
-    <string name="change_domain_old_hint">旧域名或正则，如 old.com、^gpt[0-9]+[.]example[.]com$</string>
+    <string name="change_domain_old_hint">旧域名或正则（按完整主机名匹配），支持完整网址，如 old.com、https://www.banzhu\\d*.net、^gpt[0-9]+[.]example[.]com$</string>
     <string name="change_domain_new_hint">新域名，如 new.com</string>
-    <string name="change_domain_input_tip">旧域名支持正则表达式，按解析后的完整主机名整串匹配；输入普通主机名时按字面量匹配，点击下方符号可插入到光标位置。命中的主机名整段替换为新域名，协议、端口、路径、查询与片段保持原样；新域名按固定文本处理，不解析 $1 之类的替换模板。点「检查」先看命中数量，确认后才写库。</string>
+    <string name="change_domain_input_tip">旧域名支持正则表达式，按解析后的完整主机名整串匹配；输入普通主机名时按字面量匹配，输入完整网址（如 https://www.banzhu\\d*.net）时自动提取主机名部分参与匹配，点击下方符号可插入到光标位置。命中的主机名整段替换为新域名，协议、端口、路径、查询与片段保持原样；新域名按固定文本处理，不解析 $1 之类的替换模板。点「检查」先看命中数量，确认后才写库。</string>
     <string name="change_domain_check">检查</string>
     <string name="change_domain_empty_old">请填写旧域名或正则</string>
     <string name="change_domain_empty_new">请填写新域名</string>
@@ -1020,7 +1020,7 @@
     <string name="change_domain_no_hits_rule">匹配方式：%1$s；生效规则：%2$s</string>
     <string name="change_domain_no_hits_hosts">数据库中现有的主机名（按记录数排序，最多 10 个）：</string>
     <string name="change_domain_no_hits_host_line">· %1$s（%2$d 条）</string>
-    <string name="change_domain_no_hits_hint">请对照上面的主机名核对旧域名：正则需覆盖完整主机名（含子域名），普通主机名会按字面量处理。</string>
+    <string name="change_domain_no_hits_hint">上面的主机名是数据库现有地址的清单（不是匹配结果）。正则需覆盖完整主机名（含子域名）；普通主机名按字面量处理；完整网址会自动提取主机名部分参与匹配。</string>
     <string name="change_domain_preview_title">确认替换</string>
     <string name="change_domain_preview_header">%1$s → %2$s</string>
     <string name="change_domain_pattern">生效规则：%1$s</string>
