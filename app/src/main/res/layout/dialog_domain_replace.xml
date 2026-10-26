@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingStart="20dp"
+    android:paddingTop="8dp"
+    android:paddingEnd="20dp"
+    android:paddingBottom="4dp">
+
+    <io.legado.app.ui.widget.text.TextInputLayout
+        android:id="@+id/til_old_domain"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="8dp"
+        android:hint="@string/change_domain_old_hint">
+
+        <io.legado.app.lib.theme.view.ThemeEditText
+            android:id="@+id/tie_old_domain"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:imeOptions="actionNext"
+            android:inputType="textUri"
+            android:maxLines="1"
+            tools:ignore="TouchTargetSizeCheck,SpeakableTextPresentCheck" />
+    </io.legado.app.ui.widget.text.TextInputLayout>
+
+    <!-- 旧域名正则快捷符号栏：符号由代码填充，横向滚动，只作用于旧域名输入框 -->
+    <HorizontalScrollView
+        android:id="@+id/hs_regex_symbols"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:id="@+id/ll_regex_symbols"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingHorizontal="4dp" />
+    </HorizontalScrollView>
+
+    <io.legado.app.ui.widget.text.TextInputLayout
+        android:id="@+id/til_new_domain"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="@string/change_domain_new_hint">
+
+        <io.legado.app.lib.theme.view.ThemeEditText
+            android:id="@+id/tie_new_domain"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:imeOptions="actionDone"
+            android:inputType="textUri"
+            android:maxLines="1"
+            tools:ignore="TouchTargetSizeCheck,SpeakableTextPresentCheck" />
+    </io.legado.app.ui.widget.text.TextInputLayout>
+
+    <TextView
+        android:id="@+id/tv_domain_tip"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="@string/change_domain_input_tip"
+        android:textColor="@color/secondaryText"
+        android:textSize="12sp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical|end"
+        android:orientation="horizontal">
+
+        <io.legado.app.ui.widget.text.AccentTextView
+            android:id="@+id/btn_cancel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_margin="12dp"
+            android:padding="6dp"
+            android:text="@string/cancel"
+            tools:ignore="RtlHardcoded" />
+
+        <io.legado.app.ui.widget.text.AccentTextView
+            android:id="@+id/btn_check"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_margin="12dp"
+            android:padding="6dp"
+            android:text="@string/change_domain_check"
+            tools:ignore="RtlHardcoded" />
+
+    </LinearLayout>
+</LinearLayout>

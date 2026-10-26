@@ -207,6 +207,9 @@ dependencies {
     //coreLibraryDesugaring('com.android.tools:desugar_jdk_libs_nio:2.0.4')
     coreLibraryDesugaring(libs.desugar)
     testImplementation(libs.junit)
+    // 「批量替换域名」的 SQL 回归测试需要真实 SQLite 引擎（JVM 单测跑不了 Android SQLite）。
+    // 只用于 test，不进入 APK。
+    testImplementation("org.xerial:sqlite-jdbc:3.41.2.2")
     androidTestImplementation(libs.bundles.androidTest)
     //kotlin
     //noinspection GradleDependency,DifferentStdlibGradleVersion

@@ -193,4 +193,9 @@ interface BookDao {
         """
     )
     fun replaceBookUrls(oldUrl: String, newUrl: String): Int
+
+    // 「批量替换域名」：只改书籍自身的网络地址，origin / originName / originOrder 一律不动。
+    // SQL 与单元测试共用 [DomainReplaceSql.UPDATE_BOOK_URLS]。
+    @Query(DomainReplaceSql.UPDATE_BOOK_URLS)
+    fun updateBookUrls(oldBookUrl: String, newBookUrl: String, newTocUrl: String): Int
 }

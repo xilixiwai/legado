@@ -73,10 +73,16 @@ object BookHelp {
         FileUtils.delete(filePath)
     }
 
-    fun updateCacheFolder(oldBook: Book, newBook: Book) {
+    /**
+     * 把书籍缓存目录迁移到新地址对应的目录名。
+     *
+     * @return 是否真的移动了目录。书籍没有缓存目录（从未下载/缓存过）时返回 false，
+     * 调用方据此区分「改了名」和「本来就没有目录」，避免把没有缓存的书也统计成改名成功。
+     */
+    fun updateCacheFolder(oldBook: Book, newBook: Book): Boolean {
         val oldFolderName = oldBook.getFolderNameNoCache()
         val newFolderName = newBook.getFolderNameNoCache()
-        if (oldFolderName == newFolderName) return
+        if (oldFolderName == newFolderName) return false
         val oldFolderPath = FileUtils.getPath(
             downloadDir,
             cacheFolderName,
@@ -87,7 +93,7 @@ object BookHelp {
             cacheFolderName,
             newFolderName
         )
-        FileUtils.move(oldFolderPath, newFolderPath)
+        return FileUtils.move(oldFolderPath, newFolderPath)
     }
 
     /**

@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
 import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.LinearLayout
 import androidx.activity.viewModels
 import androidx.appcompat.widget.PopupMenu
@@ -20,6 +21,7 @@ import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookGroup
 import io.legado.app.data.entities.BookSource
 import io.legado.app.databinding.ActivityArrangeBookBinding
+import io.legado.app.databinding.DialogDomainReplaceBinding
 import io.legado.app.databinding.DialogEditTextBinding
 import io.legado.app.help.DirectLinkUpload
 import io.legado.app.help.book.contains
@@ -38,6 +40,7 @@ import io.legado.app.ui.widget.dialog.WaitDialog
 import io.legado.app.ui.widget.recycler.DragSelectTouchHelper
 import io.legado.app.ui.widget.recycler.ItemTouchCallback
 import io.legado.app.ui.widget.recycler.VerticalDivider
+import io.legado.app.ui.widget.text.AccentTextView
 import io.legado.app.utils.applyTint
 import io.legado.app.utils.cnCompare
 import io.legado.app.utils.dpToPx
@@ -128,6 +131,27 @@ class BookshelfManageActivity :
         viewModel.batchChangeSourceProcessLiveData.observe(this) {
             waitDialog.setText(it)
         }
+        viewModel.domainReplaceBusy.observe(this) {
+            if (it) {
+                waitDialog.setText(R.string.change_domain_title)
+                waitDialog.show()
+            } else {
+                waitDialog.dismiss()
+            }
+        }
+        viewModel.domainReplaceCheckLiveData.observe(this) {
+            if (it == null) return@observe
+            viewModel.domainReplaceCheckLiveData.value = null
+            when (it) {
+                is DomainReplaceCheckResult.Blocked -> alertDomainReplaceBlocked(it.reason)
+                is DomainReplaceCheckResult.Ready -> alertDomainReplacePreview(it.preview)
+            }
+        }
+        viewModel.domainReplaceResultLiveData.observe(this) {
+            if (it == null) return@observe
+            viewModel.domainReplaceResultLiveData.value = null
+            alertDomainReplaceResult(it)
+        }
     }
 
     override fun onCompatCreateOptionsMenu(menu: Menu): Boolean {
@@ -197,6 +221,7 @@ class BookshelfManageActivity :
         binding.selectActionBar.setCallBack(this)
         waitDialog.setOnCancelListener {
             viewModel.batchChangeSourceCoroutine?.cancel()
+            viewModel.domainReplaceCoroutine?.cancel()
         }
     }
 
@@ -307,6 +332,9 @@ class BookshelfManageActivity :
 
             R.id.menu_add_to_group -> selectGroup(addToGroupRequestCode, 0)
             R.id.menu_change_source -> showDialogFragment<SourcePickerDialog>()
+
+            R.id.menu_change_domain -> showDomainReplaceDialog()
+
             R.id.menu_clear_cache -> viewModel.clearCache(adapter.selection)
             R.id.menu_check_selected_interval -> adapter.checkSelectedInterval()
         }
@@ -413,6 +441,218 @@ class BookshelfManageActivity :
     override fun sourceOnClick(source: BookSource) {
         viewModel.changeSource(adapter.selection, source)
         viewModel.batchChangeSourceState.value = true
+    }
+
+    /**
+     * 「批量替换域名」输入框。
+     *
+     * 不要求选中书籍，也不要求选择书源：这是一次全库维护操作，作用范围由「旧域名」决定。
+     * 点「检查」只做只读扫描，拿到命中数量后再由用户确认是否执行。
+     */
+    private fun showDomainReplaceDialog() {
+        val binding = DialogDomainReplaceBinding.inflate(layoutInflater)
+        val dialog = alert(title = getString(R.string.change_domain_title)) {
+            customView { binding.root }
+        }
+        upRegexSymbolBar(binding)
+        binding.btnCancel.setOnClickListener { dialog.dismiss() }
+        binding.btnCheck.setOnClickListener {
+            val oldInput = binding.tieOldDomain.text?.toString().orEmpty()
+            val newInput = binding.tieNewDomain.text?.toString().orEmpty()
+            dialog.dismiss()
+            viewModel.checkDomainReplace(oldInput, newInput)
+        }
+    }
+
+    /** 旧域名输入框下方的正则快捷符号栏：点击把符号插入旧域名光标位置，不影响新域名输入框 */
+    private fun upRegexSymbolBar(binding: DialogDomainReplaceBinding) {
+        binding.llRegexSymbols.removeAllViews()
+        RegexSymbolBar.symbols.forEach { symbol ->
+            val key = AccentTextView(this, null).apply {
+                text = symbol
+                textSize = 15f
+                setPaddingRelative(10.dpToPx(), 6.dpToPx(), 10.dpToPx(), 6.dpToPx())
+                // 不抢焦点：点击后输入框保持焦点，软键盘与撤销等编辑行为不受影响
+                isFocusable = false
+                setOnClickListener { insertRegexSymbol(binding.tieOldDomain, symbol) }
+            }
+            binding.llRegexSymbols.addView(key)
+        }
+    }
+
+    private fun insertRegexSymbol(editor: EditText, symbol: String) {
+        val editable = editor.editableText
+        val (newText, cursor) = RegexSymbolBar.insert(
+            text = editable.toString(),
+            selectionStart = editor.selectionStart,
+            selectionEnd = editor.selectionEnd,
+            symbol = symbol,
+        )
+        // 用 Editable 原地替换而不是 setText：不重置输入连接、不清掉焦点与撤销栈
+        editable.replace(0, editable.length, newText)
+        editor.setSelection(cursor)
+    }
+
+    private fun alertDomainReplaceBlocked(reason: String) {
+        alert(title = getString(R.string.change_domain_title), message = reason) {
+            okButton()
+        }
+    }
+
+    private fun alertDomainReplacePreview(preview: DomainReplacePreview) {
+        val rule = preview.rule
+        val message = buildString {
+            appendLine(
+                getString(R.string.change_domain_preview_header, rule.oldInput, rule.newDomain)
+            )
+            appendLine(getString(R.string.change_domain_pattern, rule.pattern))
+            appendLine(getString(R.string.change_domain_hit_books, preview.hits.bookUrl))
+            appendLine(getString(R.string.change_domain_hit_toc, preview.hits.tocUrl))
+            appendLine(
+                getString(R.string.change_domain_hit_chapter_book, preview.hits.chapterBookUrl)
+            )
+            appendLine(getString(R.string.change_domain_hit_chapter_url, preview.hits.chapterUrl))
+            appendLine(
+                getString(R.string.change_domain_hit_chapter_base, preview.hits.chapterBaseUrl)
+            )
+            appendLine(
+                getString(
+                    R.string.change_domain_hit_chapter_resource,
+                    preview.hits.chapterResourceUrl
+                )
+            )
+            appendLine(getString(R.string.change_domain_hit_total, preview.hits.total))
+            if (preview.hostMatches.isNotEmpty()) {
+                appendLine()
+                appendLine(getString(R.string.change_domain_matched_hosts))
+                preview.hostMatches.take(MAX_RESULT_DETAIL_LINES).forEach {
+                    appendLine(
+                        getString(
+                            R.string.change_domain_host_line,
+                            it.oldHost,
+                            rule.newDomain,
+                            it.count
+                        )
+                    )
+                }
+                if (preview.hostMatches.size > MAX_RESULT_DETAIL_LINES) {
+                    appendLine("…")
+                }
+            }
+            if (preview.authorityChanges.isNotEmpty()) {
+                appendLine()
+                appendLine(getString(R.string.change_domain_authority_changes))
+                preview.authorityChanges.take(MAX_RESULT_DETAIL_LINES).forEach {
+                    appendLine("· ${it.field}  ${it.oldAuthority} → ${it.newAuthority}（${it.count}）")
+                }
+                if (preview.authorityChanges.size > MAX_RESULT_DETAIL_LINES) {
+                    appendLine("…")
+                }
+            }
+            if (preview.booksToRename.isNotEmpty()) {
+                appendLine()
+                append(
+                    getString(
+                        R.string.change_domain_cache_rename,
+                        preview.booksToRename.take(MAX_RESULT_DETAIL_LINES).joinToString("、") +
+                                if (preview.booksToRename.size > MAX_RESULT_DETAIL_LINES) "…" else ""
+                    )
+                )
+            }
+            appendLine()
+            appendLine()
+            appendLine(getString(R.string.change_domain_key_check))
+            if (preview.conflicts.isNotEmpty()) {
+                appendLine()
+                appendLine(getString(R.string.change_domain_conflicts))
+                preview.conflicts.take(MAX_RESULT_DETAIL_LINES).forEach {
+                    appendLine("· $it")
+                }
+            }
+        }
+        alert(
+            title = getString(R.string.change_domain_preview_title),
+            message = message
+        ) {
+            if (preview.conflicts.isEmpty()) {
+                positiveButton(getString(R.string.change_domain_execute)) {
+                    viewModel.executeDomainReplace(rule.oldInput, rule.newDomain)
+                }
+            }
+            cancelButton()
+        }
+    }
+
+    private fun alertDomainReplaceResult(result: DomainReplaceResult) {
+        val abortReason = result.abortReason
+        if (abortReason != null) {
+            alert(
+                title = getString(R.string.change_domain_result_title),
+                message = getString(R.string.change_domain_result_aborted, abortReason)
+            ) {
+                okButton()
+            }
+            return
+        }
+        val message = buildString {
+            result.rule?.let {
+                appendLine(getString(R.string.change_domain_preview_header, it.oldInput, it.newDomain))
+            }
+            appendLine(getString(R.string.change_domain_result_books, result.booksUpdated))
+            appendLine(
+                getString(R.string.change_domain_result_chapter_book, result.chapterBookUrlUpdated)
+            )
+            appendLine(getString(R.string.change_domain_result_chapter_url, result.chapterUrlUpdated))
+            appendLine(
+                getString(R.string.change_domain_result_chapter_base, result.chapterBaseUrlUpdated)
+            )
+            appendLine(
+                getString(
+                    R.string.change_domain_result_chapter_resource,
+                    result.chapterResourceUrlUpdated
+                )
+            )
+            if (result.cacheFolderRenamed > 0 || result.cacheFolderFailed > 0) {
+                appendLine()
+                append(
+                    getString(
+                        R.string.change_domain_result_cache,
+                        result.cacheFolderRenamed,
+                        result.cacheFolderFailed
+                    )
+                )
+            }
+            if (result.readerRefreshedBooks.isNotEmpty()) {
+                appendLine()
+                appendLine()
+                append(
+                    getString(
+                        R.string.change_domain_result_reader,
+                        result.readerRefreshedBooks.joinToString("、")
+                    )
+                )
+            }
+            if (result.readerRefreshFailedBooks.isNotEmpty()) {
+                appendLine()
+                appendLine()
+                append(
+                    getString(
+                        R.string.change_domain_result_reader_failed,
+                        result.readerRefreshFailedBooks.joinToString("、")
+                    )
+                )
+            }
+        }
+        alert(
+            title = getString(R.string.change_domain_result_title),
+            message = message
+        ) {
+            okButton()
+        }
+    }
+
+    companion object {
+        private const val MAX_RESULT_DETAIL_LINES = 8
     }
 
 }
