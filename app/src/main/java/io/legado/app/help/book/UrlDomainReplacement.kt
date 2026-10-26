@@ -96,7 +96,7 @@ object UrlDomainReplacement {
         return url.substring(0, match.range.first) to url.substring(match.range.first)
     }
 
-    private class UrlParts(
+    internal class UrlParts(
         /** 形如 "https://" */
         val schemePrefix: String,
         /** 形如 "user:pw@host:8080"，不含 scheme，不含路径 */
@@ -105,7 +105,7 @@ object UrlDomainReplacement {
         val suffix: String,
     )
 
-    private fun parseHttpUrl(url: String): UrlParts? {
+    internal fun parseHttpUrl(url: String): UrlParts? {
         val lower = url.lowercase()
         val authorityStart = when {
             lower.startsWith("https://") -> 8

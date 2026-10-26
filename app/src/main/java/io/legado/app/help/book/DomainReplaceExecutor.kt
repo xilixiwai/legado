@@ -52,39 +52,48 @@ data class DomainReplacePlan(
                 resourceUrlChanges.isEmpty() && bookUpdates.isEmpty()
 }
 
-/** 下发到存储层的单条写操作 */
-sealed class DomainReplaceStatement {
+    /** 下发到存储层的单条写操作 */
+    sealed class DomainReplaceStatement {
 
-    /** 章节表某一列的 authority 前缀替换（三列共用同一套 SQL 形态） */
-    sealed class ChapterField : DomainReplaceStatement() {
-        abstract val prefix: String
-        abstract val newPrefix: String
+        /** 章节表某一列的 authority 前缀替换（三列共用同一套 SQL 形态） */
+        sealed class ChapterField : DomainReplaceStatement() {
+            abstract val prefix: String
+            abstract val newPrefix: String
+        }
+
+        data class ChapterUrl(override val prefix: String, override val newPrefix: String) :
+            ChapterField()
+
+        data class ChapterBaseUrl(override val prefix: String, override val newPrefix: String) :
+            ChapterField()
+
+        data class ChapterResourceUrl(override val prefix: String, override val newPrefix: String) :
+            ChapterField()
+
+        /**
+         * 章节主键冲突去重：删除改写后会与同书已有新域名行撞 `(url, bookUrl)` 键的旧域名重复行。
+         * 必须先于同前缀的 [ChapterUrl] 执行；影响行数单独计数并报告。
+         */
+        data class ChapterUrlDedupe(val prefix: String, val newPrefix: String) :
+            DomainReplaceStatement()
+
+        data class BookUrls(val oldBookUrl: String, val newBookUrl: String, val newTocUrl: String) :
+            DomainReplaceStatement()
+
+        data class ChapterBookUrl(val oldBookUrl: String, val newBookUrl: String) :
+            DomainReplaceStatement()
     }
 
-    data class ChapterUrl(override val prefix: String, override val newPrefix: String) :
-        ChapterField()
-
-    data class ChapterBaseUrl(override val prefix: String, override val newPrefix: String) :
-        ChapterField()
-
-    data class ChapterResourceUrl(override val prefix: String, override val newPrefix: String) :
-        ChapterField()
-
-    data class BookUrls(val oldBookUrl: String, val newBookUrl: String, val newTocUrl: String) :
-        DomainReplaceStatement()
-
-    data class ChapterBookUrl(val oldBookUrl: String, val newBookUrl: String) :
-        DomainReplaceStatement()
-}
-
-/** 各字段实际影响行数，全部来自 SQL 的返回值 */
-data class DomainReplaceCounts(
-    val chapterUrl: Int = 0,
-    val chapterBaseUrl: Int = 0,
-    val chapterResourceUrl: Int = 0,
-    val books: Int = 0,
-    val chapterBookUrl: Int = 0,
-)
+    /** 各字段实际影响行数，全部来自 SQL 的返回值 */
+    data class DomainReplaceCounts(
+        val chapterUrl: Int = 0,
+        val chapterBaseUrl: Int = 0,
+        val chapterResourceUrl: Int = 0,
+        val books: Int = 0,
+        val chapterBookUrl: Int = 0,
+        /** 因章节主键冲突被删除的旧域名重复章节数（不算进 chapterUrl 的改写行数） */
+        val chapterUrlDuplicates: Int = 0,
+    )
 
 /**
  * 批量替换的**写入顺序**与**外键处理**。
@@ -170,9 +179,13 @@ object DomainReplaceExecutor {
         var chapterResourceUrl = 0
         var books = 0
         var chapterBookUrl = 0
+        var chapterUrlDuplicates = 0
 
-        // 1. 章节地址：不参与外键，先改
+        // 1. 章节地址：不参与外键，先改；url 列先去重（删除撞键的旧域名重复行）再改写
         plan.urlChanges.forEach {
+            chapterUrlDuplicates += apply(
+                DomainReplaceStatement.ChapterUrlDedupe(it.prefix, it.newPrefix)
+            )
             chapterUrl += apply(DomainReplaceStatement.ChapterUrl(it.prefix, it.newPrefix))
         }
         plan.baseUrlChanges.forEach {
@@ -207,6 +220,7 @@ object DomainReplaceExecutor {
             chapterResourceUrl = chapterResourceUrl,
             books = books,
             chapterBookUrl = chapterBookUrl,
+            chapterUrlDuplicates = chapterUrlDuplicates,
         )
     }
 }

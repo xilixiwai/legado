@@ -28,6 +28,7 @@ import io.legado.app.ui.book.group.GroupManageDialog
 import io.legado.app.ui.book.import.local.ImportBookActivity
 import io.legado.app.ui.book.import.remote.RemoteBookActivity
 import io.legado.app.ui.book.manage.BookshelfManageActivity
+import io.legado.app.ui.book.manage.DomainReplaceConflictDialog
 import io.legado.app.ui.book.manage.DomainReplaceCheckResult
 import io.legado.app.ui.book.manage.DomainReplacePreview
 import io.legado.app.ui.book.manage.DomainReplaceResult
@@ -444,37 +445,75 @@ abstract class BaseBookshelfFragment(layoutId: Int) : VMBaseFragment<BookshelfVi
             appendLine()
             appendLine()
             appendLine(getString(R.string.change_domain_key_check))
-            if (preview.conflicts.isNotEmpty()) {
+            if (preview.duplicateChapters.isNotEmpty()) {
                 appendLine()
-                appendLine(getString(R.string.change_domain_conflicts))
-                preview.conflicts.take(MAX_RESULT_DETAIL_LINES).forEach {
-                    appendLine("· $it")
+                appendLine(getString(R.string.change_domain_dup_chapters_header))
+                preview.duplicateChapters.take(MAX_RESULT_DETAIL_LINES).forEach {
+                    appendLine(getString(R.string.change_domain_dup_chapters_line, it.count))
                 }
+            }
+            if (preview.conflictItems.isNotEmpty()) {
+                appendLine()
+                appendLine(
+                    getString(
+                        R.string.change_domain_conflicts_pending_header,
+                        preview.conflictItems.size
+                    )
+                )
+                preview.conflictItems.take(MAX_RESULT_DETAIL_LINES).forEach {
+                    appendLine("· " + DomainReplaceConflictDialog.itemSummary(requireContext(), it))
+                }
+                if (preview.conflictItems.size > MAX_RESULT_DETAIL_LINES) {
+                    appendLine("…")
+                }
+                appendLine(getString(R.string.change_domain_conflicts_execute_note))
             }
         }
         alert(
             title = getString(R.string.change_domain_preview_title),
             message = message
         ) {
-            if (preview.conflicts.isEmpty()) {
+            // 无冲突记录先替换：冲突不再禁止执行，只影响展示与执行范围
+            if (preview.hits.hasAny) {
                 positiveButton(getString(R.string.change_domain_execute)) {
                     domainReplaceViewModel.executeDomainReplace(rule.oldInput, rule.newDomain)
+                }
+            }
+            if (preview.conflictItems.isNotEmpty()) {
+                neutralButton(getString(R.string.change_domain_view_conflicts)) {
+                    showDomainReplaceConflictDialog()
                 }
             }
             cancelButton()
         }
     }
 
+    private fun showDomainReplaceConflictDialog() {
+        showDialogFragment(DomainReplaceConflictDialog.newInstance())
+    }
+
+    /** 冲突清单弹窗通过它拿到本 Fragment 作用域的 ViewModel */
+    internal fun domainReplaceVm(): DomainReplaceViewModel = domainReplaceViewModel
+
     private fun alertDomainReplaceResult(result: DomainReplaceResult) {
         val abortReason = result.abortReason
         if (abortReason != null) {
             val message = getString(R.string.change_domain_result_aborted, abortReason)
+            val hasConflicts =
+                domainReplaceViewModel.conflictItemsLiveData.value.orEmpty().isNotEmpty()
             alert(
                 title = getString(R.string.change_domain_result_title),
                 message = message
             ) {
                 neutralButton(getString(R.string.copy_text)) { requireContext().sendToClip(message) }
-                okButton()
+                if (hasConflicts) {
+                    positiveButton(getString(R.string.change_domain_view_conflicts)) {
+                        showDomainReplaceConflictDialog()
+                    }
+                    cancelButton()
+                } else {
+                    okButton()
+                }
             }
             return
         }
@@ -508,8 +547,42 @@ abstract class BaseBookshelfFragment(layoutId: Int) : VMBaseFragment<BookshelfVi
                     }
                 }
             }
+            if (result.chapterDuplicatesDeleted > 0) {
+                appendLine(
+                    getString(R.string.change_domain_result_dedup, result.chapterDuplicatesDeleted)
+                )
+            }
+            if (result.progressFixCount > 0) {
+                appendLine(
+                    getString(
+                        R.string.change_domain_result_progress_fix,
+                        result.progressFixCount
+                    )
+                )
+            }
             if (result.remainingHits >= 0) {
-                appendLine(getString(R.string.change_domain_result_remaining, result.remainingHits))
+                appendLine(
+                    getString(
+                        R.string.change_domain_result_remaining_split,
+                        result.remainingBookUrlHits,
+                        result.remainingChapterHits
+                    )
+                )
+            }
+            if (result.conflictsPending.isNotEmpty()) {
+                appendLine()
+                appendLine(
+                    getString(
+                        R.string.change_domain_result_pending_conflicts,
+                        result.booksSkippedByConflict
+                    )
+                )
+                result.conflictsPending.take(MAX_RESULT_DETAIL_LINES).forEach {
+                    appendLine("· " + DomainReplaceConflictDialog.itemSummary(requireContext(), it))
+                }
+                if (result.conflictsPending.size > MAX_RESULT_DETAIL_LINES) {
+                    appendLine("…")
+                }
             }
             if (result.cacheFolderRenamed > 0 || result.cacheFolderFailed > 0) {
                 appendLine()
@@ -547,7 +620,15 @@ abstract class BaseBookshelfFragment(layoutId: Int) : VMBaseFragment<BookshelfVi
             message = message
         ) {
             neutralButton(getString(R.string.copy_text)) { requireContext().sendToClip(message) }
-            okButton()
+            if (result.conflictsPending.isNotEmpty()) {
+                // 部分完成状态：待处理冲突不算成功，提供清单入口继续处理
+                positiveButton(getString(R.string.change_domain_view_conflicts)) {
+                    showDomainReplaceConflictDialog()
+                }
+                cancelButton()
+            } else {
+                okButton()
+            }
         }
     }
 

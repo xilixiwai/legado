@@ -89,6 +89,62 @@ interface BookChapterDao {
     @Query(DomainReplaceSql.COUNT_CHAPTER_URL_CONFLICTS)
     fun countChapterUrlConflicts(prefix: String, newPrefix: String): Int
 
+    /** 单本书范围的章节主键冲突预检（冲突清单重新检查 / 单本完成替换用） */
+    @Query(DomainReplaceSql.COUNT_CHAPTER_URL_CONFLICTS_FOR_BOOK)
+    fun countChapterUrlConflictsForBook(
+        bookUrl: String,
+        prefix: String,
+        newPrefix: String,
+    ): Int
+
+    /** 删除改写后会与同书已有新域名行撞 (url, bookUrl) 键的旧域名重复章节 */
+    @Query(DomainReplaceSql.DELETE_DUPLICATE_CHAPTER_URLS)
+    fun deleteDuplicateChapterUrls(prefix: String, newPrefix: String): Int
+
+    /** 单本书范围的重复章节删除 */
+    @Query(DomainReplaceSql.DELETE_DUPLICATE_CHAPTER_URLS_FOR_BOOK)
+    fun deleteDuplicateChapterUrlsForBook(
+        bookUrl: String,
+        prefix: String,
+        newPrefix: String,
+    ): Int
+
+    /** 列出存在章节主键冲突的书籍（阅读进度修正按书进行） */
+    @Query(DomainReplaceSql.CONFLICT_CHAPTER_BOOKS)
+    fun conflictChapterBooks(prefix: String, newPrefix: String): List<String>
+
+    /** 列出单本书内将被删除的旧域名重复章节 url（阅读进度修正的快照依据） */
+    @Query(DomainReplaceSql.DUPLICATE_CHAPTER_URLS_FOR_BOOK)
+    fun duplicateChapterUrlsForBook(
+        bookUrl: String,
+        prefix: String,
+        newPrefix: String,
+    ): List<String>
+
+    /** 单本书范围把 chapters.url 的前缀 [prefix] 整段换成 [newPrefix] */
+    @Query(DomainReplaceSql.REPLACE_CHAPTER_URL_DOMAIN_FOR_BOOK)
+    fun replaceChapterUrlDomainForBook(
+        bookUrl: String,
+        prefix: String,
+        newPrefix: String,
+    ): Int
+
+    /** 同 [replaceChapterUrlDomainForBook]，作用于 baseUrl */
+    @Query(DomainReplaceSql.REPLACE_CHAPTER_BASE_URL_DOMAIN_FOR_BOOK)
+    fun replaceChapterBaseUrlDomainForBook(
+        bookUrl: String,
+        prefix: String,
+        newPrefix: String,
+    ): Int
+
+    /** 同 [replaceChapterUrlDomainForBook]，作用于 resourceUrl */
+    @Query(DomainReplaceSql.REPLACE_CHAPTER_RESOURCE_URL_DOMAIN_FOR_BOOK)
+    fun replaceChapterResourceUrlDomainForBook(
+        bookUrl: String,
+        prefix: String,
+        newPrefix: String,
+    ): Int
+
     /** 同步章节归属（FK: chapters.bookUrl → books.bookUrl） */
     @Query(DomainReplaceSql.REPLACE_CHAPTER_BOOK_URL)
     fun replaceChapterBookUrl(oldBookUrl: String, newBookUrl: String): Int

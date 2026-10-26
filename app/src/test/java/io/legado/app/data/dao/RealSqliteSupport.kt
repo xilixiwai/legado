@@ -31,7 +31,7 @@ import java.sql.DriverManager
  */
 internal object RealSqliteSupport {
 
-    /** 从 Room 导出的 schema 里取最新版本的 books / chapters 建表语句（含索引） */
+    /** 从 Room 导出的 schema 里取最新版本的相关表建表语句（含索引） */
     fun productionDdl(): List<String> {
         val dirs = listOf(
             File("schemas/io.legado.app.data.AppDatabase"),
@@ -46,7 +46,7 @@ internal object RealSqliteSupport {
 
         val root = JsonParser.parseString(schema.readText()).asJsonObject
         val entities = root.getAsJsonObject("database").getAsJsonArray("entities")
-        val wanted = listOf("books", "chapters")
+        val wanted = listOf("books", "chapters", "bookmarks", "readRecord")
         val found = LinkedHashMap<String, MutableList<String>>()
         entities.forEach { element ->
             val entity = element.asJsonObject

@@ -57,4 +57,11 @@ interface BookmarkDao {
     @Delete
     fun delete(vararg bookmark: Bookmark)
 
+    /**
+     * 「批量替换域名」旧书源记录清理时，把用户书签挂到保留的新记录名下。
+     * bookmarks 无主键约束，按书名+作者整体改写；返回影响行数。
+     */
+    @Query(DomainReplaceSql.REKEY_BOOKMARKS)
+    fun rekeyOwner(oldName: String, oldAuthor: String, newName: String, newAuthor: String): Int
+
 }

@@ -36,6 +36,9 @@ object DomainReplaceAudit {
 
     /**
      * 对照计划数与实际影响行数，返回不一致的字段（完全一致返回空列表）。
+     *
+     * `chapters.url` 的实际口径 = 改写行数 + 因撞键被删除的重复行数：
+     * 撞键行删除后不再被改写，删除与改写合计才等于计划命中数。
      * [planned] 为 null 表示没有可对照的计划（输入非法等提前终止），不视为不一致。
      */
     fun compare(
@@ -46,7 +49,11 @@ object DomainReplaceAudit {
         return listOf(
             FieldCount("books", planned.books, counts.books),
             FieldCount("chapters.bookUrl", planned.chapterBookUrl, counts.chapterBookUrl),
-            FieldCount("chapters.url", planned.chapterUrl, counts.chapterUrl),
+            FieldCount(
+                "chapters.url",
+                planned.chapterUrl,
+                counts.chapterUrl + counts.chapterUrlDuplicates
+            ),
             FieldCount("chapters.baseUrl", planned.chapterBaseUrl, counts.chapterBaseUrl),
             FieldCount(
                 "chapters.resourceUrl",

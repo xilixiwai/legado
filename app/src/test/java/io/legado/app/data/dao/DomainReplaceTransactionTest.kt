@@ -23,12 +23,13 @@ import java.sql.SQLException
  * 每条用例都对应一条硬性要求：
  * 1. 成功提交后 books.bookUrl / tocUrl、chapters.url、chapters.bookUrl 三处一致；
  * 2. 书籍主键冲突 → 整批失败并回滚，不留半完成状态；
- * 3. 章节主键 `(url, bookUrl)` 冲突 → 同上；
+ * 3. 章节主键 `(url, bookUrl)` 冲突 → 自动去重（保留 `index` 较小的一行），不再阻断整批；
  * 4. 事务中途抛异常 → 之前已执行的更新全部回滚；
  * 5. `PRAGMA defer_foreign_keys` 只是把外键检查推迟到提交，**不是关闭约束**；
- * 6. 预览过期（数据在执行前被改）→ 重新预检能拦住；即使拦不住，SQLite 约束也会兜底；
+ * 6. 预览过期（数据在执行前被改）→ 重新预检能发现；章节级冲突执行时自动解决，
+ *    书籍级冲突仍由 SQLite 约束兜底（见用例 2）；
  * 7. 计数全部来自语句实际影响行数，异常时不返回「部分成功」；
- * 8. 不删除章节、不改阅读进度与书源绑定。
+ * 8. 正常路径不删除章节、不改阅读进度与书源绑定；仅章节主键冲突时删除重复行。
  */
 class DomainReplaceTransactionTest {
 
@@ -158,7 +159,7 @@ class DomainReplaceTransactionTest {
     // ------------------------------------------------------------------ 3. 章节主键冲突
 
     @Test
-    fun `章节主键冲突时整批回滚`() {
+    fun `章节主键冲突自动去重后整批继续`() {
         // 同一本书里已存在「新域名版本」的同一章 → 改写后会撞 (url, bookUrl) 主键
         conn.insertChapter(
             mapOf(
@@ -183,20 +184,16 @@ class DomainReplaceTransactionTest {
             )
         )
 
-        // 即使绕过预检直接写，SQLite 约束也会拦住
-        val error = assertThrows(SQLException::class.java) { executePlan(buildPlan()) }
-        assertTrue("实际错误：${error.message}", error.message!!.contains("UNIQUE", true))
+        // 本轮起章节级冲突不再让整批失败：去重删除 index 较大的新域名重复行
+        val counts = executePlan(buildPlan())
+        assertEquals(1, counts.chapterUrlDuplicates)
 
-        // 全部回滚：旧地址还在，注入的重复章也还在
+        // 幸存的是 index 较小的旧行（改写后成为新域名地址），注入的重复章被删除
         assertEquals(
-            listOf(
-                "http://old.com/ch/0.html",
-                "http://old.com/ch/1.html",
-                "http://new.com/ch/0.html",
-            ),
+            listOf("http://new.com/ch/0.html", "http://new.com/ch/1.html"),
             conn.strings("select url from chapters order by `index`")
         )
-        assertEquals(oldBookUrl, single("select bookUrl from books"))
+        assertEquals(newBookUrl, single("select bookUrl from books"))
         assertEquals(emptyList<String>(), conn.foreignKeyViolations())
     }
 
@@ -347,7 +344,7 @@ class DomainReplaceTransactionTest {
     // ------------------------------------------------------------------ 6. 预览过期
 
     @Test
-    fun `预览过期后执行前重新预检能拦住`() {
+    fun `预览过期后重新预检发现冲突_执行时自动去重完成`() {
         // 预览时刻：没有冲突
         val change = buildPlan().urlChanges.single()
         assertEquals(
@@ -381,17 +378,15 @@ class DomainReplaceTransactionTest {
             )
         )
 
-        // 即使跳过预检直接写，约束兜底 + 回滚，数据保持原样
-        assertThrows(SQLException::class.java) { executePlan(buildPlan()) }
+        // 执行：章节级过期冲突按 index 自动去重，整批完成；书籍级冲突仍由约束兜底（用例 2）
+        val counts = executePlan(buildPlan())
+        assertEquals(1, counts.chapterUrlDuplicates)
         assertEquals(
-            listOf(
-                "http://old.com/ch/0.html",
-                "http://old.com/ch/1.html",
-                "http://new.com/ch/0.html",
-            ),
+            listOf("http://new.com/ch/0.html", "http://new.com/ch/1.html"),
             conn.strings("select url from chapters order by `index`")
         )
-        assertEquals(oldBookUrl, single("select bookUrl from books"))
+        assertEquals(newBookUrl, single("select bookUrl from books"))
+        assertEquals(emptyList<String>(), conn.foreignKeyViolations())
     }
 
     // ------------------------------------------------------------------ 内部
@@ -436,6 +431,11 @@ class DomainReplaceTransactionTest {
 
     private fun applyStatement(statement: DomainReplaceStatement): Int {
         return when (statement) {
+            is DomainReplaceStatement.ChapterUrlDedupe -> conn.exec(
+                DomainReplaceSql.DELETE_DUPLICATE_CHAPTER_URLS,
+                mapOf("prefix" to statement.prefix, "newPrefix" to statement.newPrefix)
+            )
+
             is DomainReplaceStatement.ChapterUrl -> conn.exec(
                 DomainReplaceSql.REPLACE_CHAPTER_URL_DOMAIN,
                 mapOf("prefix" to statement.prefix, "newPrefix" to statement.newPrefix)

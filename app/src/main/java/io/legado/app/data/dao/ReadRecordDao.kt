@@ -52,4 +52,11 @@ interface ReadRecordDao {
 
     @Query("delete from readRecord where bookName = :bookName")
     fun deleteByName(bookName: String)
+
+    /**
+     * 「批量替换域名」旧书源记录清理时迁移阅读时长统计。
+     * 主键是 (deviceId, bookName)：与保留记录的统计行撞键时跳过该行（OR IGNORE），返回迁移行数。
+     */
+    @Query(DomainReplaceSql.REKEY_READ_RECORD)
+    fun rekeyOwner(oldName: String, newName: String): Int
 }
