@@ -1048,6 +1048,14 @@
     <string name="change_domain_result_reader">阅读器已刷新：%1$s。当前正文页仍可能持有旧地址，请重新进入该书后再确认目录与正文。</string>
     <string name="change_domain_result_reader_failed">阅读器刷新失败：%1$s。请退出该书并重新进入，否则阅读进度可能无法写回新地址。</string>
     <string name="change_domain_result_aborted">未执行：%1$s</string>
+    <string name="change_domain_task_running">批量替换域名任务正在执行中，请等待完成后再操作</string>
+    <string name="change_domain_stage_prepare">正在准备替换任务…</string>
+    <string name="change_domain_stage_update">正在更新数据库记录…</string>
+    <string name="change_domain_stage_finish">正在完成事务并核对更新结果…</string>
+    <string name="change_domain_result_planned_total">计划更新合计（与预览同口径）：%1$d 项</string>
+    <string name="change_domain_audit_mismatch">%1$s：计划 %2$d 项，实际 %3$d 项</string>
+    <string name="change_domain_result_mismatch">警告：计划与实际更新数量不一致，替换可能未完成，请重新检查！</string>
+    <string name="change_domain_result_remaining">替换后仍匹配旧域名的记录：%1$d 条（0 表示替换彻底）</string>
     <string name="change_domain_conflict_books_duplicate">多本书籍会指向同一个地址 %1$s：%2$s</string>
     <string name="change_domain_conflict_book_occupied">《%1$s》替换后的地址 %2$s 已被书架中另一本书占用</string>
     <string name="change_domain_conflict_chapter">%1$s 有 %2$d 条章节改写后会与同一本书已有章节地址重复</string>

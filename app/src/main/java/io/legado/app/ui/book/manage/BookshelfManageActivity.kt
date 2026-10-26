@@ -134,10 +134,17 @@ class BookshelfManageActivity :
         viewModel.domainReplaceBusy.observe(this) {
             if (it) {
                 waitDialog.setText(R.string.change_domain_title)
+                // 批量替换的数据库事务无法安全中断：执行期间禁用返回键取消，
+                // 避免「取消被静默吞掉、既无反馈也看不到结果」的路径
+                waitDialog.setCancelable(false)
                 waitDialog.show()
             } else {
+                waitDialog.setCancelable(true)
                 waitDialog.dismiss()
             }
+        }
+        viewModel.domainReplaceProcessLiveData.observe(this) {
+            waitDialog.setText(it)
         }
         viewModel.domainReplaceCheckLiveData.observe(this) {
             if (it == null) return@observe
@@ -221,7 +228,8 @@ class BookshelfManageActivity :
         binding.selectActionBar.setCallBack(this)
         waitDialog.setOnCancelListener {
             viewModel.batchChangeSourceCoroutine?.cancel()
-            viewModel.domainReplaceCoroutine?.cancel()
+            // 批量替换域名的数据库事务无法安全取消，不在这里取消该任务；
+            // 执行期间对话框本身也被设为不可取消（见 domainReplaceBusy 观察者）
         }
     }
 
@@ -586,10 +594,12 @@ class BookshelfManageActivity :
     private fun alertDomainReplaceResult(result: DomainReplaceResult) {
         val abortReason = result.abortReason
         if (abortReason != null) {
+            val message = getString(R.string.change_domain_result_aborted, abortReason)
             alert(
                 title = getString(R.string.change_domain_result_title),
-                message = getString(R.string.change_domain_result_aborted, abortReason)
+                message = message
             ) {
+                neutralButton(getString(R.string.copy_text)) { sendToClip(message) }
                 okButton()
             }
             return
@@ -612,6 +622,21 @@ class BookshelfManageActivity :
                     result.chapterResourceUrlUpdated
                 )
             )
+            // 计划数与实际数对照：预览有命中但实际没更新必须显式报告，不能当成功展示
+            result.planned?.let { planned ->
+                appendLine(
+                    getString(R.string.change_domain_result_planned_total, planned.total)
+                )
+                if (result.countMismatches.isNotEmpty()) {
+                    appendLine(getString(R.string.change_domain_result_mismatch))
+                    result.countMismatches.take(MAX_RESULT_DETAIL_LINES).forEach {
+                        appendLine("· $it")
+                    }
+                }
+            }
+            if (result.remainingHits >= 0) {
+                appendLine(getString(R.string.change_domain_result_remaining, result.remainingHits))
+            }
             if (result.cacheFolderRenamed > 0 || result.cacheFolderFailed > 0) {
                 appendLine()
                 append(
@@ -647,6 +672,7 @@ class BookshelfManageActivity :
             title = getString(R.string.change_domain_result_title),
             message = message
         ) {
+            neutralButton(getString(R.string.copy_text)) { sendToClip(message) }
             okButton()
         }
     }

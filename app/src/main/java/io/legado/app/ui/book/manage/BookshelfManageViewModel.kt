@@ -14,9 +14,11 @@ import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.BookUrlMove
 import io.legado.app.help.book.BookUrlUpdate
 import io.legado.app.help.book.ChapterFieldChange
+import io.legado.app.help.book.DomainReplaceAudit
 import io.legado.app.help.book.DomainReplaceCounts
 import io.legado.app.help.book.DomainReplaceExecutor
 import io.legado.app.help.book.DomainReplacePlan
+import io.legado.app.help.book.DomainReplacePlannedCounts
 import io.legado.app.help.book.DomainReplaceStatement
 import io.legado.app.help.book.UrlDomainReplacement
 import io.legado.app.help.book.isLocal
@@ -34,6 +36,7 @@ import io.legado.app.utils.writeToOutputStream
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 
 /**
@@ -98,6 +101,12 @@ data class DomainReplaceResult(
     val readerRefreshedBooks: List<String> = emptyList(),
     /** 正在阅读、但内存对象刷新失败的书；必须提示用户退出重进，否则进度可能写不回库 */
     val readerRefreshFailedBooks: List<String> = emptyList(),
+    /** 执行阶段用与预览同口径算出的计划数量，用于与实际影响行数对照 */
+    val planned: DomainReplacePlannedCounts? = null,
+    /** 计划数与实际影响行数不一致的字段描述（空 = 完全一致） */
+    val countMismatches: List<String> = emptyList(),
+    /** 提交后用同一规则重查的剩余旧域名命中数；-1 表示未核对（未执行写库） */
+    val remainingHits: Int = -1,
     /** 非空表示本次没有写入任何数据（输入非法 / 无命中 / 存在冲突 / 事务失败） */
     val abortReason: String? = null,
 )
@@ -138,10 +147,19 @@ class BookshelfManageViewModel(application: Application) : BaseViewModel(applica
 
     val domainReplaceBusy = MutableLiveData<Boolean>()
 
+    /** 执行阶段文字（准备 / 更新数据库 / 完成事务并核对），由 WaitDialog 展示 */
+    val domainReplaceProcessLiveData = MutableLiveData<String>()
+
     /** 一次性事件：UI 消费后置空，避免旋转屏幕时重复弹窗 */
     val domainReplaceCheckLiveData = MutableLiveData<DomainReplaceCheckResult?>()
     val domainReplaceResultLiveData = MutableLiveData<DomainReplaceResult?>()
     var domainReplaceCoroutine: Coroutine<*>? = null
+
+    /**
+     * 检查/执行互斥标记：执行中的数据库事务无法安全中断，
+     * 任务进行期间禁止再次提交检查或执行，防止重复执行与「取消后无反馈」。
+     */
+    private val domainReplaceRunning = AtomicBoolean(false)
 
     fun upCanUpdate(books: List<Book>, canUpdate: Boolean) {
         execute {
@@ -240,6 +258,14 @@ class BookshelfManageViewModel(application: Application) : BaseViewModel(applica
 
     /** 「检查」：只读扫描，不写库、不动缓存、不动阅读器 */
     fun checkDomainReplace(oldInput: String, newInput: String) {
+        if (!domainReplaceRunning.compareAndSet(false, true)) {
+            domainReplaceCheckLiveData.postValue(
+                DomainReplaceCheckResult.Blocked(
+                    context.getString(R.string.change_domain_task_running)
+                )
+            )
+            return
+        }
         domainReplaceCoroutine?.cancel()
         domainReplaceCoroutine = execute {
             buildDomainReplaceCheck(oldInput, newInput)
@@ -251,11 +277,21 @@ class BookshelfManageViewModel(application: Application) : BaseViewModel(applica
                     it.localizedMessage ?: it.javaClass.simpleName
                 )
             )
+        }.onFinally {
+            domainReplaceRunning.set(false)
         }
     }
 
     /** 用户确认后执行；所有写入在一个事务内完成 */
     fun executeDomainReplace(oldInput: String, newInput: String) {
+        if (!domainReplaceRunning.compareAndSet(false, true)) {
+            domainReplaceCheckLiveData.postValue(
+                DomainReplaceCheckResult.Blocked(
+                    context.getString(R.string.change_domain_task_running)
+                )
+            )
+            return
+        }
         domainReplaceCoroutine?.cancel()
         domainReplaceCoroutine = execute {
             runDomainReplace(oldInput, newInput)
@@ -273,6 +309,8 @@ class BookshelfManageViewModel(application: Application) : BaseViewModel(applica
                 )
             )
         }.onFinally {
+            // onFinally 在成功/失败/取消三种结局都会执行，互斥标记必须在这里释放
+            domainReplaceRunning.set(false)
             domainReplaceBusy.postValue(false)
         }
     }
@@ -526,11 +564,19 @@ class BookshelfManageViewModel(application: Application) : BaseViewModel(applica
 
             is UrlDomainReplacement.NormalizeResult.Success -> result.rule
         }
+        AppLog.put("批量替换域名开始：${rule.oldInput} → ${rule.newDomain}")
+        domainReplaceProcessLiveData.postValue(
+            context.getString(R.string.change_domain_stage_prepare)
+        )
         var abortReason: String? = null
         var counts = DomainReplaceCounts()
+        var planned: DomainReplacePlannedCounts? = null
         val movingBooks = mutableListOf<BookPlan>()
 
         appDb.runInTransaction {
+            domainReplaceProcessLiveData.postValue(
+                context.getString(R.string.change_domain_stage_update)
+            )
             val bookPlans = planBooks(rule)
             val urlChanges = chapterFieldChanges(appDb.bookChapterDao.domainGroupsOfChapterUrl(), rule)
             val baseUrlChanges =
@@ -561,6 +607,16 @@ class BookshelfManageViewModel(application: Application) : BaseViewModel(applica
                 )
                 return@runInTransaction
             }
+
+            // 计划数先落档：与 SQL 真实影响行数是两条独立口径，事后对照可发现语义漂移
+            planned = DomainReplacePlannedCounts(
+                books = plannedBooks.size,
+                chapterBookUrl = plannedBooks.filter { it.bookUrlChanged }
+                    .sumOf { appDb.bookChapterDao.getChapterCount(it.oldBookUrl) },
+                chapterUrl = urlChanges.sumOf { it.count },
+                chapterBaseUrl = baseUrlChanges.sumOf { it.count },
+                chapterResourceUrl = resourceUrlChanges.sumOf { it.count },
+            )
 
             // 写入顺序与外键处理由 DomainReplaceExecutor 统一负责，与真实 SQLite 测试共用同一段逻辑
             counts = DomainReplaceExecutor.run(
@@ -604,6 +660,21 @@ class BookshelfManageViewModel(application: Application) : BaseViewModel(applica
             movingBooks.addAll(plannedBooks.filter { it.bookUrlChanged })
         }
 
+        // runInTransaction 返回即已提交或回滚。这里用同一套匹配规则重查库里剩余命中，
+        // 作为「实际更新是否彻底」的核对依据，而不是只看 SQL 返回值。
+        domainReplaceProcessLiveData.postValue(
+            context.getString(R.string.change_domain_stage_finish)
+        )
+        val remainingHits = if (abortReason == null) countRemainingHits(rule) else -1
+        val countMismatches = DomainReplaceAudit.compare(planned, counts).map {
+            context.getString(
+                R.string.change_domain_audit_mismatch,
+                it.field,
+                it.planned,
+                it.actual
+            )
+        }
+
         val result = DomainReplaceResult(
             rule = rule,
             booksUpdated = counts.books,
@@ -611,9 +682,27 @@ class BookshelfManageViewModel(application: Application) : BaseViewModel(applica
             chapterUrlUpdated = counts.chapterUrl,
             chapterBaseUrlUpdated = counts.chapterBaseUrl,
             chapterResourceUrlUpdated = counts.chapterResourceUrl,
+            planned = planned,
+            countMismatches = countMismatches,
+            remainingHits = remainingHits,
             abortReason = abortReason,
         )
-        if (abortReason != null) return result
+        if (abortReason != null) {
+            AppLog.put("批量替换域名未执行：$abortReason")
+            return result
+        }
+        if (countMismatches.isNotEmpty()) {
+            AppLog.put(
+                "批量替换域名计划与实际不一致\n${countMismatches.joinToString("\n")}"
+            )
+        } else {
+            AppLog.put(
+                "批量替换域名完成并提交：" +
+                    "books=${counts.books} chapters.bookUrl=${counts.chapterBookUrl} " +
+                    "chapters.url=${counts.chapterUrl} baseUrl=${counts.chapterBaseUrl} " +
+                    "resourceUrl=${counts.chapterResourceUrl} 剩余旧域名命中=$remainingHits"
+            )
+        }
 
         // 事务提交成功之后才碰文件系统与内存对象，避免回滚后留下改过名的缓存目录
         var renamed = 0
@@ -646,6 +735,22 @@ class BookshelfManageViewModel(application: Application) : BaseViewModel(applica
             readerRefreshedBooks = readerRefreshed,
             readerRefreshFailedBooks = readerFailed,
         )
+    }
+
+    /**
+     * 提交后核对：用同一套匹配规则重查，返回库里仍会命中的记录数。
+     * 替换彻底时应为 0（规则幂等有测试保证）；大于 0 说明仍有旧域名残留，必须报告。
+     */
+    private fun countRemainingHits(rule: UrlDomainReplacement.DomainRule): Int {
+        val bookHits = planBooks(rule).count { it.changed }
+        val chapterHits =
+            chapterFieldChanges(appDb.bookChapterDao.domainGroupsOfChapterUrl(), rule)
+                .sumOf { it.count } +
+                chapterFieldChanges(appDb.bookChapterDao.domainGroupsOfChapterBaseUrl(), rule)
+                    .sumOf { it.count } +
+                chapterFieldChanges(appDb.bookChapterDao.domainGroupsOfChapterResourceUrl(), rule)
+                    .sumOf { it.count }
+        return bookHits + chapterHits
     }
 
     /**
