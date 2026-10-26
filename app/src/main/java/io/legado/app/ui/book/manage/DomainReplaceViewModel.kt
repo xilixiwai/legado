@@ -722,22 +722,33 @@ class DomainReplaceViewModel(
      */
     private fun applyDedupeProgressFixes(urlChanges: List<ChapterFieldChange>): Int {
         var fixed = 0
+        // 一本书可能同时命中多个前缀组（如同一规则映射多个旧域名）：
+        // 先合并该书全部待删除集合，再只做一次快照重定位——
+        // 重定位以删除前坐标系为基准，逐组各算一次会对已修正的 index 二次偏移
+        val deletedByBook = HashMap<String, MutableSet<String>>()
         urlChanges.forEach { change ->
-            val bookUrls = appDb.bookChapterDao.conflictChapterBooks(change.prefix, change.newPrefix)
-            bookUrls.forEach { bookUrl ->
-                val book = appDb.bookDao.getBook(bookUrl) ?: return@forEach
-                val before = appDb.bookChapterDao.getChapterList(bookUrl)
-                if (before.isEmpty()) return@forEach
-                val deletedUrls = appDb.bookChapterDao.duplicateChapterUrlsForBook(
-                    bookUrl, change.prefix, change.newPrefix,
-                ).toSet()
-                if (deletedUrls.isEmpty()) return@forEach
-                val adjusted = DomainReplaceConflicts.adjustProgressAfterDedupe(
-                    book.durChapterIndex,
-                    before.map { it.url },
-                    deletedUrls,
-                ) ?: return@forEach
-                if (adjusted.first == book.durChapterIndex) return@forEach
+            appDb.bookChapterDao.conflictChapterBooks(change.prefix, change.newPrefix)
+                .forEach { bookUrl ->
+                    val deleted = appDb.bookChapterDao.duplicateChapterUrlsForBook(
+                        bookUrl, change.prefix, change.newPrefix,
+                    ).toSet()
+                    if (deleted.isNotEmpty()) {
+                        deletedByBook.getOrPut(bookUrl) { mutableSetOf() }.addAll(deleted)
+                    }
+                }
+        }
+        deletedByBook.forEach { (bookUrl, deletedUrls) ->
+            val book = appDb.bookDao.getBook(bookUrl) ?: return@forEach
+            val before = appDb.bookChapterDao.getChapterList(bookUrl)
+            if (before.isEmpty()) return@forEach
+            val orderedUrls = before.map { it.url }
+            // 进度修正（规则不变）：按删除前快照的章节路径映射到幸存序列
+            val adjusted = DomainReplaceConflicts.adjustProgressAfterDedupe(
+                book.durChapterIndex,
+                orderedUrls,
+                deletedUrls,
+            )
+            if (adjusted != null && adjusted.first != book.durChapterIndex) {
                 val newTitle = adjusted.second?.let { url ->
                     before.firstOrNull { it.url == url }?.title
                 }
@@ -748,6 +759,27 @@ class DomainReplaceViewModel(
                     "批量替换域名：章节去重后《${book.name}》阅读位置修正为第 ${adjusted.first} 章"
                 )
                 fixed++
+            }
+            // 书签重定位（同一快照、同一事务）：书签只存 chapterIndex 数字，
+            // 删除行会让其后的书签错位；按章节路径映射回幸存章节，
+            // 指向被删行的书签映射到同路径的保留副本；无法可靠映射的保持原位并记录
+            appDb.bookmarkDao.getByBook(book.name, book.author).forEach { bookmark ->
+                val adjustedBookmark = DomainReplaceConflicts.adjustProgressAfterDedupe(
+                    bookmark.chapterIndex,
+                    orderedUrls,
+                    deletedUrls,
+                )
+                when {
+                    adjustedBookmark == null -> AppLog.put(
+                        "批量替换域名：《${book.name}》书签「${bookmark.chapterName}」" +
+                                "（第 ${bookmark.chapterIndex} 章）无法可靠重映射，保持原位"
+                    )
+
+                    adjustedBookmark.first != bookmark.chapterIndex -> {
+                        bookmark.chapterIndex = adjustedBookmark.first
+                        appDb.bookmarkDao.update(bookmark)
+                    }
+                }
             }
         }
         return fixed
@@ -1177,31 +1209,54 @@ class DomainReplaceViewModel(
         return SingleResult(counts, error, cacheRenamed)
     }
 
-    /** [applyDedupeProgressFixes] 的单书版本（只处理指定书籍的章节） */
+    /** [applyDedupeProgressFixes] 的单书版本（只处理指定书籍的章节与书签） */
     private fun applySingleBookDedupeProgressFix(
         bookUrl: String,
         urlChanges: List<ChapterFieldChange>,
     ) {
+        // 合并该书命中的全部前缀组待删除集合，只做一次快照重定位（理由同批量路径）
+        val deletedUrls = mutableSetOf<String>()
         urlChanges.forEach { change ->
-            val deletedUrls = appDb.bookChapterDao.duplicateChapterUrlsForBook(
+            deletedUrls += appDb.bookChapterDao.duplicateChapterUrlsForBook(
                 bookUrl, change.prefix, change.newPrefix,
             ).toSet()
-            if (deletedUrls.isEmpty()) return@forEach
-            val book = appDb.bookDao.getBook(bookUrl) ?: return@forEach
-            val before = appDb.bookChapterDao.getChapterList(bookUrl)
-            if (before.isEmpty()) return@forEach
-            val adjusted = DomainReplaceConflicts.adjustProgressAfterDedupe(
-                book.durChapterIndex,
-                before.map { it.url },
-                deletedUrls,
-            ) ?: return@forEach
-            if (adjusted.first == book.durChapterIndex) return@forEach
+        }
+        if (deletedUrls.isEmpty()) return
+        val book = appDb.bookDao.getBook(bookUrl) ?: return
+        val before = appDb.bookChapterDao.getChapterList(bookUrl)
+        if (before.isEmpty()) return
+        val orderedUrls = before.map { it.url }
+        val adjusted = DomainReplaceConflicts.adjustProgressAfterDedupe(
+            book.durChapterIndex,
+            orderedUrls,
+            deletedUrls,
+        )
+        if (adjusted != null && adjusted.first != book.durChapterIndex) {
             val newTitle = adjusted.second?.let { url ->
                 before.firstOrNull { it.url == url }?.title
             }
             book.durChapterIndex = adjusted.first
             if (newTitle != null) book.durChapterTitle = newTitle
             appDb.bookDao.update(book)
+        }
+        // 书签重定位（同一快照、同一事务），语义与批量路径一致
+        appDb.bookmarkDao.getByBook(book.name, book.author).forEach { bookmark ->
+            val adjustedBookmark = DomainReplaceConflicts.adjustProgressAfterDedupe(
+                bookmark.chapterIndex,
+                orderedUrls,
+                deletedUrls,
+            )
+            when {
+                adjustedBookmark == null -> AppLog.put(
+                    "批量替换域名：《${book.name}》书签「${bookmark.chapterName}」" +
+                            "（第 ${bookmark.chapterIndex} 章）无法可靠重映射，保持原位"
+                )
+
+                adjustedBookmark.first != bookmark.chapterIndex -> {
+                    bookmark.chapterIndex = adjustedBookmark.first
+                    appDb.bookmarkDao.update(bookmark)
+                }
+            }
         }
     }
 

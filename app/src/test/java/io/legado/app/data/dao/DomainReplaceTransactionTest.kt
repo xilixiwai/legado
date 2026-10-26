@@ -2,6 +2,7 @@ package io.legado.app.data.dao
 
 import io.legado.app.help.book.BookUrlMove
 import io.legado.app.help.book.BookUrlUpdate
+import io.legado.app.help.book.DomainReplaceConflicts
 import io.legado.app.help.book.DomainReplaceCounts
 import io.legado.app.help.book.DomainReplaceExecutor
 import io.legado.app.help.book.DomainReplacePlan
@@ -23,7 +24,7 @@ import java.sql.SQLException
  * 每条用例都对应一条硬性要求：
  * 1. 成功提交后 books.bookUrl / tocUrl、chapters.url、chapters.bookUrl 三处一致；
  * 2. 书籍主键冲突 → 整批失败并回滚，不留半完成状态；
- * 3. 章节主键 `(url, bookUrl)` 冲突 → 自动去重（保留 `index` 较小的一行），不再阻断整批；
+ * 3. 章节主键 `(url, bookUrl)` 冲突 → 自动去重（删除旧域名行、保留新域名行），不再阻断整批；
  * 4. 事务中途抛异常 → 之前已执行的更新全部回滚；
  * 5. `PRAGMA defer_foreign_keys` 只是把外键检查推迟到提交，**不是关闭约束**；
  * 6. 预览过期（数据在执行前被改）→ 重新预检能发现；章节级冲突执行时自动解决，
@@ -409,11 +410,131 @@ class DomainReplaceTransactionTest {
         assertEquals(emptyList<String>(), conn.foreignKeyViolations())
     }
 
+    @Test
+    fun `书签修正随去重事务失败一并回滚`() {
+        // 同书新域名重复行（触发去重与书签重定位）+ 目标主键被占用（books 更新必然失败）
+        conn.insertChapter(
+            mapOf(
+                "url" to "http://new.com/ch/0.html", "title" to "重复章", "isVolume" to "0",
+                "baseUrl" to "http://new.com", "bookUrl" to oldBookUrl,
+                "index" to "9", "isVip" to "0", "isPay" to "0",
+            )
+        )
+        conn.insertBook(
+            mapOf(
+                "bookUrl" to newBookUrl,
+                "tocUrl" to "$newBookUrl/toc",
+                "name" to "占用者",
+                "author" to "别人",
+            )
+        )
+        conn.insertBookmarkedRow("测试书", "测试作者", 1, "bm-测试", 5001)
+
+        val rule = when (val r = UrlDomainReplacement.normalize("old.com", "new.com")) {
+            is UrlDomainReplacement.NormalizeResult.Success -> r.rule
+            is UrlDomainReplacement.NormalizeResult.Failure -> throw AssertionError(r.reason.name)
+        }
+        conn.autoCommit = false
+        val error = assertThrows(SQLException::class.java) {
+            try {
+                // 与 ViewModel 相同：同一事务内先重定位书签/进度，再执行去重与改写
+                val ordered = conn.strings(
+                    "select url from chapters where bookUrl = '$oldBookUrl' order by `index`"
+                )
+                val deleted = conn.strings(
+                    DomainReplaceSql.DUPLICATE_CHAPTER_URLS_FOR_BOOK,
+                    mapOf(
+                        "bookUrl" to oldBookUrl,
+                        "prefix" to "http://old.com",
+                        "newPrefix" to "http://new.com",
+                    )
+                ).toSet()
+                val adjusted = DomainReplaceConflicts.adjustProgressAfterDedupe(1, ordered, deleted)
+                assertEquals(0, adjusted?.first)
+                conn.exec("update bookmarks set chapterIndex = 0 where time = 5001")
+                val urlChanges =
+                    DomainReplaceExecutor.changes(conn.groups(DomainReplaceSql.CHAPTER_URL_GROUPS), rule)
+                urlChanges.forEach { change ->
+                    conn.exec(
+                        DomainReplaceSql.LIFT_CHAPTER_INDEXES,
+                        mapOf(
+                            "prefix" to change.prefix,
+                            "newPrefix" to change.newPrefix,
+                            "offset" to DomainReplaceExecutor.INDEX_COMPACT_OFFSET.toString(),
+                        )
+                    )
+                    conn.exec(
+                        DomainReplaceSql.DELETE_DUPLICATE_CHAPTER_URLS,
+                        mapOf("prefix" to change.prefix, "newPrefix" to change.newPrefix)
+                    )
+                    conn.exec(
+                        DomainReplaceSql.SETTLE_CHAPTER_INDEXES,
+                        mapOf("offset" to DomainReplaceExecutor.INDEX_COMPACT_OFFSET.toString())
+                    )
+                    conn.exec(
+                        DomainReplaceSql.REPLACE_CHAPTER_URL_DOMAIN,
+                        mapOf("prefix" to change.prefix, "newPrefix" to change.newPrefix)
+                    )
+                }
+                conn.execRaw(DomainReplaceExecutor.DEFER_FOREIGN_KEYS)
+                conn.exec(
+                    DomainReplaceSql.UPDATE_BOOK_URLS,
+                    mapOf(
+                        "oldBookUrl" to oldBookUrl,
+                        "newBookUrl" to newBookUrl,
+                        "newTocUrl" to "$newBookUrl/toc",
+                    )
+                )
+                conn.commit()
+            } finally {
+                conn.rollback()
+                conn.autoCommit = true
+            }
+        }
+        assertTrue("实际错误：${error.message}", error.message!!.contains("UNIQUE", true))
+
+        // 全部回滚：书签、章节（含 index 与重复行）、书籍主键原样
+        assertEquals(
+            "1",
+            conn.strings("select chapterIndex from bookmarks where time = 5001").single()
+        )
+        assertEquals(
+            listOf("http://old.com/ch/0.html", "http://old.com/ch/1.html", "http://new.com/ch/0.html"),
+            conn.strings("select url from chapters order by `index`")
+        )
+        assertEquals(listOf(0, 1, 9), ints("select `index` from chapters order by `index`"))
+        assertEquals(oldBookUrl, single("select bookUrl from books where name = '测试书'"))
+        assertEquals(emptyList<String>(), conn.foreignKeyViolations())
+    }
+
     // ------------------------------------------------------------------ 内部
 
     private fun single(sql: String): String = conn.strings(sql).single()
 
     private fun ints(sql: String): List<Int> = conn.strings(sql).map { it.toInt() }
+
+    private fun Connection.insertBookmarkedRow(
+        name: String,
+        author: String,
+        chapterIndex: Int,
+        chapterName: String,
+        time: Long,
+    ) {
+        prepareStatement(
+            "insert into bookmarks (time, bookName, bookAuthor, chapterIndex, chapterPos, chapterName, bookText, content) " +
+                    "values (?, ?, ?, ?, ?, ?, ?, ?)"
+        ).use { statement ->
+            statement.setLong(1, time)
+            statement.setString(2, name)
+            statement.setString(3, author)
+            statement.setInt(4, chapterIndex)
+            statement.setInt(5, 100)
+            statement.setString(6, chapterName)
+            statement.setString(7, "选中文本")
+            statement.setString(8, "想法内容")
+            statement.executeUpdate()
+        }
+    }
 
     private fun buildPlan(): DomainReplacePlan {
         val rule = when (val r = UrlDomainReplacement.normalize("old.com", "new.com")) {

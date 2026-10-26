@@ -32,7 +32,9 @@ import java.sql.SQLException
  * 7. 同名不同书不被合并或删除；
  * 8. 单条处理失败不回滚已提交的其他结果；
  * 9. 冲突消失后单本完成替换（作用域 SQL）；
- * 10. 已完成的记录重查为零（幂等）；提交后重查与统计一致。
+ * 10. 已完成的记录重查为零（幂等）；提交后重查与统计一致；
+ * 11. 去重后书签按幸存章节路径重定位（指向被删行映射到保留副本；
+ *     无法映射保持原位；同名不同路径不按标题匹配；其他书籍书签不动）。
  */
 class DomainReplaceWorkflowTest {
 
@@ -433,6 +435,221 @@ class DomainReplaceWorkflowTest {
         }
     }
 
+    // ------------------------------------------------------------------ 书签重定位
+
+    /**
+     * 与 ViewModel 相同的书签重定位：按删除前快照的章节路径把书签 chapterIndex
+     * 映射到幸存序列；指向被删行的书签映射到同路径保留副本；无法映射保持原位。
+     * 核心断言：重定位后的 index 在最终幸存章节序列里指向的，正是书签原先
+     * 指向的章节（或其确认的保留副本）——按路径验证，不只看数字。
+     */
+    private fun remapBookmarksAtSqlLevel(
+        bookName: String,
+        bookAuthor: String,
+        ordered: List<String>,
+        deleted: Set<String>,
+    ) {
+        conn.strings(
+            "select time||'|'||chapterIndex from bookmarks " +
+                    "where bookName = '$bookName' and bookAuthor = '$bookAuthor'"
+        ).forEach { row ->
+            val time = row.substringBefore('|')
+            val oldIndex = row.substringAfter('|').toInt()
+            val adjusted = DomainReplaceConflicts.adjustProgressAfterDedupe(oldIndex, ordered, deleted)
+            if (adjusted != null && adjusted.first != oldIndex) {
+                conn.exec(
+                    "update bookmarks set chapterIndex = :idx where time = :t",
+                    mapOf("idx" to adjusted.first.toString(), "t" to time)
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `去重后书签按幸存章节重定位_指向被删行映射到保留副本`() {
+        // 书A 扩到 4 章旧域名行 + 2 条新域名重复行 + 1 行非 http 章节
+        (2..3).forEach { i ->
+            conn.insertChapter(
+                mapOf(
+                    "url" to "https://old.com/ch/a$i.html", "title" to "第${i}章", "isVolume" to "0",
+                    "baseUrl" to "https://old.com", "bookUrl" to "https://old.com/book/1",
+                    "index" to i.toString(), "isVip" to "0", "isPay" to "0",
+                )
+            )
+        }
+        (1..2).forEach { i ->
+            conn.insertChapter(
+                mapOf(
+                    "url" to "https://new.com/ch/a$i.html", "title" to "重复章$i", "isVolume" to "0",
+                    "baseUrl" to "https://new.com", "bookUrl" to "https://old.com/book/1",
+                    "index" to (i + 5).toString(), "isVip" to "0", "isPay" to "0",
+                )
+            )
+        }
+        conn.insertChapter(
+            mapOf(
+                "url" to "/local/x.txt", "title" to "本地章", "isVolume" to "0",
+                "baseUrl" to "", "bookUrl" to "https://old.com/book/1",
+                "index" to "9", "isVip" to "0", "isPay" to "0",
+            )
+        )
+        // 书签：0=幸存前段；3=幸存后段（前面有删除行）；1/2=恰指向被删行；
+        // 99=越界不可映射；6=指向非 http 章节（路径不可解析）；书B 一条不属于本次范围
+        conn.insertBookmarkedRow("书A", "作者A", 0, "bm-a0", 1001)
+        conn.insertBookmarkedRow("书A", "作者A", 3, "bm-a3", 1002)
+        conn.insertBookmarkedRow("书A", "作者A", 1, "bm-a1被删", 1003)
+        conn.insertBookmarkedRow("书A", "作者A", 2, "bm-a2被删", 1004)
+        conn.insertBookmarkedRow("书A", "作者A", 99, "bm-越界", 1005)
+        conn.insertBookmarkedRow("书A", "作者A", 6, "bm-本地", 1006)
+        conn.insertBookmarkedRow("书B", "作者B", 0, "bm-书B", 2001)
+
+        // 与 ViewModel 相同的顺序：先按删除前快照重定位书签与进度，再执行去重与改写
+        val ordered = conn.strings(
+            "select url from chapters where bookUrl = 'https://old.com/book/1' order by `index`"
+        )
+        val deleted = conn.strings(
+            DomainReplaceSql.DUPLICATE_CHAPTER_URLS_FOR_BOOK,
+            mapOf(
+                "bookUrl" to "https://old.com/book/1",
+                "prefix" to "https://old.com",
+                "newPrefix" to "https://new.com",
+            )
+        ).toSet()
+        // 书签原指向章节的路径（重定位语义的依据）
+        val originalPaths = mapOf(
+            1001 to DomainReplaceConflicts.pathOf(ordered[0]),
+            1002 to DomainReplaceConflicts.pathOf(ordered[3]),
+            1003 to DomainReplaceConflicts.pathOf(ordered[1]),
+            1004 to DomainReplaceConflicts.pathOf(ordered[2]),
+        )
+        assertEquals(
+            setOf("https://old.com/ch/a1.html", "https://old.com/ch/a2.html"),
+            deleted
+        )
+        conn.autoCommit = false
+        try {
+            // 与 ViewModel 相同：合并全部待删除集合后只做一次重定位
+            // （重定位以删除前坐标系为基准，重复应用会二次偏移——由单次调用保证）
+            remapBookmarksAtSqlLevel("书A", "作者A", ordered, deleted)
+            conn.commit()
+        } finally {
+            conn.autoCommit = true
+        }
+        val counts = executePlan(buildPlan(excludeBookUrls = setOf("https://old.com/book/2")))
+        assertEquals(2, counts.chapterUrlDuplicates)
+
+        // 最终幸存章节序列（按 index）：a0、a3（旧改写）+ 重复章1/2（保留的新域名行）+ 本地章
+        val finalList = conn.strings(
+            "select url from chapters where bookUrl = 'https://new.com/book/1' order by `index`"
+        )
+        assertEquals(
+            listOf(
+                "https://new.com/ch/a0.html",
+                "https://new.com/ch/a3.html",
+                "https://new.com/ch/a1.html",
+                "https://new.com/ch/a2.html",
+                "/local/x.txt",
+            ),
+            finalList
+        )
+        // 核心断言：每个书签的最终 index 指向的章节路径 == 书签原先指向的路径
+        fun bookmarkIndex(time: Long): Int =
+            conn.strings("select chapterIndex from bookmarks where time = $time").single().toInt()
+        assertEquals(0, bookmarkIndex(1001))
+        assertEquals(1, bookmarkIndex(1002))
+        assertEquals(2, bookmarkIndex(1003))
+        assertEquals(3, bookmarkIndex(1004))
+        originalPaths.forEach { (time, originalPath) ->
+            val finalIndex = bookmarkIndex(time.toLong())
+            assertEquals(
+                "书签 $time 重定位后未指向原章节",
+                originalPath,
+                DomainReplaceConflicts.pathOf(finalList[finalIndex])
+            )
+        }
+        // 无法可靠映射的书签保持原位（越界 / 非 http 路径）
+        assertEquals(99, bookmarkIndex(1005))
+        assertEquals(6, bookmarkIndex(1006))
+        // 其他书籍的书签完全不动
+        assertEquals(0, bookmarkIndex(2001))
+        assertEquals(emptyList<String>(), conn.foreignKeyViolations())
+    }
+
+    @Test
+    fun `同名不同路径的书签按路径重定位不按标题`() {
+        // 书Z：两个同名章节（不同路径）+ 其中一个路径有新域名重复行。
+        // 书签指向 two.html；重定位必须按路径落回 two.html，不得被同名章节截胡
+        insertBook("https://old.com/book/9", "https://old.com/book/9/toc", "书Z", "作者Z")
+        listOf(
+            Triple("https://old.com/ch/one.html", "番外", 0),
+            Triple("https://old.com/ch/two.html", "番外", 1),
+        ).forEach { (url, title, index) ->
+            conn.insertChapter(
+                mapOf(
+                    "url" to url, "title" to title, "isVolume" to "0",
+                    "baseUrl" to "https://old.com", "bookUrl" to "https://old.com/book/9",
+                    "index" to index.toString(), "isVip" to "0", "isPay" to "0",
+                )
+            )
+        }
+        conn.insertChapter(
+            mapOf(
+                "url" to "https://new.com/ch/one.html", "title" to "番外二", "isVolume" to "0",
+                "baseUrl" to "https://new.com", "bookUrl" to "https://old.com/book/9",
+                "index" to "5", "isVip" to "0", "isPay" to "0",
+            )
+        )
+        conn.insertBookmarkedRow("书Z", "作者Z", 1, "bm-two", 3001)
+
+        val ordered = conn.strings(
+            "select url from chapters where bookUrl = 'https://old.com/book/9' order by `index`"
+        )
+        val deleted = conn.strings(
+            DomainReplaceSql.DUPLICATE_CHAPTER_URLS_FOR_BOOK,
+            mapOf(
+                "bookUrl" to "https://old.com/book/9",
+                "prefix" to "https://old.com",
+                "newPrefix" to "https://new.com",
+            )
+        ).toSet()
+        assertEquals(setOf("https://old.com/ch/one.html"), deleted)
+        conn.autoCommit = false
+        try {
+            remapBookmarksAtSqlLevel("书Z", "作者Z", ordered, deleted)
+            conn.commit()
+        } finally {
+            conn.autoCommit = true
+        }
+        executePlan(buildPlan(excludeBookUrls = setOf("https://old.com/book/2")))
+
+        val finalList = conn.strings(
+            "select url from chapters where bookUrl = 'https://new.com/book/9' order by `index`"
+        )
+        assertEquals(
+            listOf("https://new.com/ch/two.html", "https://new.com/ch/one.html"),
+            finalList
+        )
+        val finalIndex = conn.strings(
+            "select chapterIndex from bookmarks where time = 3001"
+        ).single().toInt()
+        assertEquals(0, finalIndex)
+        assertEquals(
+            "/ch/two.html",
+            DomainReplaceConflicts.pathOf(finalList[finalIndex])
+        )
+    }
+
+    @Test
+    fun `无重复章节时书签保持不变`() {
+        conn.insertBookmarkedRow("书A", "作者A", 1, "bm-无去重", 4001)
+        val counts = executePlan(buildPlan(excludeBookUrls = setOf("https://old.com/book/2")))
+        assertEquals(0, counts.chapterUrlDuplicates)
+        assertEquals(
+            "1",
+            conn.strings("select chapterIndex from bookmarks where time = 4001").single()
+        )
+    }
+
     // ------------------------------------------------------------------ 5. A1 清理
 
     @Test
@@ -794,12 +1011,13 @@ class DomainReplaceWorkflowTest {
         author: String,
         chapterIndex: Int,
         chapterName: String,
+        time: Long = 1000L,
     ) {
         prepareStatement(
             "insert into bookmarks (time, bookName, bookAuthor, chapterIndex, chapterPos, chapterName, bookText, content) " +
                     "values (?, ?, ?, ?, ?, ?, ?, ?)"
         ).use { statement ->
-            statement.setLong(1, 1000L)
+            statement.setLong(1, time)
             statement.setString(2, name)
             statement.setString(3, author)
             statement.setInt(4, chapterIndex)
