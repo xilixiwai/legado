@@ -154,139 +154,144 @@ object DomainReplaceSql {
         """
 
     /**
-     * 章节主键冲突的自动处理：同一本书里同一章节存在新旧域名两行时，删除 `index` 较大的一行。
+     * 章节主键冲突的自动处理：同一本书里同一章节存在新旧域名两行时，
+     * **保留新域名行**（域名迁移的目的地），删除将被改写撞键的旧域名重复行。
      *
-     * 业务含义：`(url, bookUrl)` 主键冲突的唯一成因是同书内同一章节路径同时存在
-     * 旧域名行与新域名行（部分迁移状态），改写后两行 url 相同，唯一约束只能保留一行。
-     * 保留 `index` 较小的一行：目录顺序与阅读位置保持连续，无需重排；
+     * 自动删除的证据要求（不满足一律不动，绝不为提高自动处理率而放宽）：
+     * 1. 两行属于同一本书（`bookUrl` 相同，结构性同书）；
+     * 2. 旧域名行命中用户声明的替换规则前缀且边界合法（改写后必然撞键）；
+     * 3. 新域名行的 URL 与旧域名行改写结果完全一致（同书 + 规则映射 + 规范化路径相同）。
+     * 保留的新域名行保持自身 URL、标题等全部字段，不用旧记录字段覆盖；
      * 删除行数单独计数并在结果中报告。
      *
-     * 两个分支分别从冲突对的两侧识别同一批冲突对，`index` 唯一索引保证每对恰好删一行：
-     * - 分支一：本行是待改写的旧域名行，已存在改写后同 URL 的行且其 `index` 更小；
-     * - 分支二：本行是新域名行，存在将改写成同 URL 的旧域名行（边界合法）且其 `index` 更小。
+     * 删除旧行可能留下 `index` 空洞，由 [LIFT_CHAPTER_INDEXES] + [SETTLE_CHAPTER_INDEXES]
+     * 在同一事务内紧凑重排（见两语句的 KDoc）。
      */
     const val DELETE_DUPLICATE_CHAPTER_URLS = """
         DELETE FROM chapters
-        WHERE (
-                substr(chapters.url, 1, length(:prefix)) = :prefix
-                AND (length(chapters.url) = length(:prefix)
-                  OR substr(chapters.url, length(:prefix) + 1, 1) IN ('/', '?', '#')
-                  OR (substr(chapters.url, length(:prefix) + 1, 1) = ',' AND substr(chapters.url, length(:prefix) + 2, 1) = '{'))
-              )
+        WHERE substr(url, 1, length(:prefix)) = :prefix
+          AND (length(url) = length(:prefix)
+            OR substr(url, length(:prefix) + 1, 1) IN ('/', '?', '#')
+            OR (substr(url, length(:prefix) + 1, 1) = ',' AND substr(url, length(:prefix) + 2, 1) = '{'))
+          AND EXISTS (
+              SELECT 1 FROM chapters b
+              WHERE b.bookUrl = chapters.bookUrl
+                AND b.url = :newPrefix || substr(chapters.url, length(:prefix) + 1)
+          )
+        """
+
+    /**
+     * 章节去重配套·第一步：把「存在将删除旧域名重复行」的书籍的**全部**章节
+     * `index` 整体抬升 [offset]（一个远大于任何书籍章节数的高位空区）。
+     *
+     * 目的：删除旧域名行会在 `index` 序列里留洞，随后需要按幸存顺序紧凑重排；
+     * `(bookUrl, index)` 唯一索引下，直接往下挪一行可能与还没挪的行临时撞键
+     * （SQLite 不保证行更新顺序）。先把受影响书籍的所有行抬到空区，
+     * 后续重排的每个目标位都是空的，**与行更新顺序无关**，任何 SQLite 实现下都安全。
+     * 抬升与回落在调用方同一事务内完成，异常整体回滚。
+     */
+    const val LIFT_CHAPTER_INDEXES = """
+        UPDATE chapters SET `index` = `index` + :offset
+        WHERE bookUrl IN (
+            SELECT DISTINCT bookUrl FROM chapters
+            WHERE substr(url, 1, length(:prefix)) = :prefix
+              AND (length(url) = length(:prefix)
+                OR substr(url, length(:prefix) + 1, 1) IN ('/', '?', '#')
+                OR (substr(url, length(:prefix) + 1, 1) = ',' AND substr(url, length(:prefix) + 2, 1) = '{'))
               AND EXISTS (
                   SELECT 1 FROM chapters b
                   WHERE b.bookUrl = chapters.bookUrl
                     AND b.url = :newPrefix || substr(chapters.url, length(:prefix) + 1)
-                    AND b.`index` < chapters.`index`
               )
-            OR (
-                substr(chapters.url, 1, length(:newPrefix)) = :newPrefix
-                AND EXISTS (
-                    SELECT 1 FROM chapters b
-                    WHERE b.bookUrl = chapters.bookUrl
-                      AND substr(b.url, 1, length(:prefix)) = :prefix
-                      AND (length(b.url) = length(:prefix)
-                        OR substr(b.url, length(:prefix) + 1, 1) IN ('/', '?', '#')
-                        OR (substr(b.url, length(:prefix) + 1, 1) = ',' AND substr(b.url, length(:prefix) + 2, 1) = '{'))
-                      AND b.url = :prefix || substr(chapters.url, length(:newPrefix) + 1)
-                      AND b.`index` < chapters.`index`
-                )
-            )
+        )
+        """
+
+    /**
+     * 章节去重配套·第二步：把仍停留在高位空区（`index` ≥ [offset]）的章节行
+     * 按幸存相对顺序紧凑重排为 `0..K-1`。
+     *
+     * 新 index = 该书内 `index` 比自己小的行数（即按当前顺序的名次）。
+     * 目标位 0..K-1 已被抬升步骤腾空，且行间比较在执行前后保持一致
+     * （名次的大小关系与原 index 的大小关系相同），因此与行更新顺序无关；
+     * 若同一本书出现重复 `index`（唯一索引所不容的脏数据），语句会因唯一索引失败，
+     * 事务整体回滚，绝不静默错排。
+     */
+    const val SETTLE_CHAPTER_INDEXES = """
+        UPDATE chapters SET `index` = (
+            SELECT count(*) FROM chapters c
+            WHERE c.bookUrl = chapters.bookUrl
+              AND c.`index` < chapters.`index`
+        )
+        WHERE `index` >= :offset
         """
 
     /** 单本书范围的重复章节删除（单本完成替换用），语义同 [DELETE_DUPLICATE_CHAPTER_URLS] */
     const val DELETE_DUPLICATE_CHAPTER_URLS_FOR_BOOK = """
         DELETE FROM chapters
         WHERE bookUrl = :bookUrl
-          AND (
-                (
-                    substr(chapters.url, 1, length(:prefix)) = :prefix
-                    AND (length(chapters.url) = length(:prefix)
-                      OR substr(chapters.url, length(:prefix) + 1, 1) IN ('/', '?', '#')
-                      OR (substr(chapters.url, length(:prefix) + 1, 1) = ',' AND substr(chapters.url, length(:prefix) + 2, 1) = '{'))
-                )
-                AND EXISTS (
-                    SELECT 1 FROM chapters b
-                    WHERE b.bookUrl = chapters.bookUrl
-                      AND b.url = :newPrefix || substr(chapters.url, length(:prefix) + 1)
-                      AND b.`index` < chapters.`index`
-                )
-              OR (
-                    substr(chapters.url, 1, length(:newPrefix)) = :newPrefix
-                    AND EXISTS (
-                        SELECT 1 FROM chapters b
-                        WHERE b.bookUrl = chapters.bookUrl
-                          AND substr(b.url, 1, length(:prefix)) = :prefix
-                          AND (length(b.url) = length(:prefix)
-                            OR substr(b.url, length(:prefix) + 1, 1) IN ('/', '?', '#')
-                            OR (substr(b.url, length(:prefix) + 1, 1) = ',' AND substr(b.url, length(:prefix) + 2, 1) = '{'))
-                          AND b.url = :prefix || substr(chapters.url, length(:newPrefix) + 1)
-                          AND b.`index` < chapters.`index`
-                    )
-                )
+          AND substr(url, 1, length(:prefix)) = :prefix
+          AND (length(url) = length(:prefix)
+            OR substr(url, length(:prefix) + 1, 1) IN ('/', '?', '#')
+            OR (substr(url, length(:prefix) + 1, 1) = ',' AND substr(url, length(:prefix) + 2, 1) = '{'))
+          AND EXISTS (
+              SELECT 1 FROM chapters b
+              WHERE b.bookUrl = chapters.bookUrl
+                AND b.url = :newPrefix || substr(chapters.url, length(:prefix) + 1)
           )
         """
 
-    /** 列出存在章节主键冲突的书籍（阅读进度修正按书进行） */
-    const val CONFLICT_CHAPTER_BOOKS = """
-        SELECT DISTINCT a.bookUrl FROM chapters a
-        WHERE (
-                substr(a.url, 1, length(:prefix)) = :prefix
-                AND (length(a.url) = length(:prefix)
-                  OR substr(a.url, length(:prefix) + 1, 1) IN ('/', '?', '#')
-                  OR (substr(a.url, length(:prefix) + 1, 1) = ',' AND substr(a.url, length(:prefix) + 2, 1) = '{'))
-              )
-              AND EXISTS (
-                  SELECT 1 FROM chapters b
-                  WHERE b.bookUrl = a.bookUrl
-                    AND b.url = :newPrefix || substr(a.url, length(:prefix) + 1)
-                    AND b.`index` < a.`index`
-              )
-            OR (
-                substr(a.url, 1, length(:newPrefix)) = :newPrefix
-                AND EXISTS (
-                    SELECT 1 FROM chapters b
-                    WHERE b.bookUrl = a.bookUrl
-                      AND substr(b.url, 1, length(:prefix)) = :prefix
-                      AND (length(b.url) = length(:prefix)
-                        OR substr(b.url, length(:prefix) + 1, 1) IN ('/', '?', '#')
-                        OR (substr(b.url, length(:prefix) + 1, 1) = ',' AND substr(b.url, length(:prefix) + 2, 1) = '{'))
-                      AND b.url = :prefix || substr(a.url, length(:newPrefix) + 1)
-                      AND b.`index` < a.`index`
-                )
-            )
+    /** [LIFT_CHAPTER_INDEXES] 的单本书版本（单本完成替换用） */
+    const val LIFT_CHAPTER_INDEXES_FOR_BOOK = """
+        UPDATE chapters SET `index` = `index` + :offset
+        WHERE bookUrl = :bookUrl
+          AND substr(url, 1, length(:prefix)) = :prefix
+          AND (length(url) = length(:prefix)
+            OR substr(url, length(:prefix) + 1, 1) IN ('/', '?', '#')
+            OR (substr(url, length(:prefix) + 1, 1) = ',' AND substr(url, length(:prefix) + 2, 1) = '{'))
+          AND EXISTS (
+              SELECT 1 FROM chapters b
+              WHERE b.bookUrl = chapters.bookUrl
+                AND b.url = :newPrefix || substr(chapters.url, length(:prefix) + 1)
+          )
         """
 
-    /** 列出单本书内将被删除的重复章节 url（阅读进度修正的快照依据），语义同 [DELETE_DUPLICATE_CHAPTER_URLS] */
+    /** [SETTLE_CHAPTER_INDEXES] 的单本书版本（单本完成替换用） */
+    const val SETTLE_CHAPTER_INDEXES_FOR_BOOK = """
+        UPDATE chapters SET `index` = (
+            SELECT count(*) FROM chapters c
+            WHERE c.bookUrl = chapters.bookUrl
+              AND c.`index` < chapters.`index`
+        )
+        WHERE bookUrl = :bookUrl
+          AND `index` >= :offset
+        """
+
+    /** 列出存在章节主键冲突（将删除旧域名重复行）的书籍（阅读进度修正按书进行） */
+    const val CONFLICT_CHAPTER_BOOKS = """
+        SELECT DISTINCT a.bookUrl FROM chapters a
+        WHERE substr(a.url, 1, length(:prefix)) = :prefix
+          AND (length(a.url) = length(:prefix)
+            OR substr(a.url, length(:prefix) + 1, 1) IN ('/', '?', '#')
+            OR (substr(a.url, length(:prefix) + 1, 1) = ',' AND substr(a.url, length(:prefix) + 2, 1) = '{'))
+          AND EXISTS (
+              SELECT 1 FROM chapters b
+              WHERE b.bookUrl = a.bookUrl
+                AND b.url = :newPrefix || substr(a.url, length(:prefix) + 1)
+          )
+        """
+
+    /** 列出单本书内将被删除的旧域名重复章节 url（阅读进度修正的快照依据） */
     const val DUPLICATE_CHAPTER_URLS_FOR_BOOK = """
         SELECT url FROM chapters a
         WHERE a.bookUrl = :bookUrl
-          AND (
-                (
-                    substr(a.url, 1, length(:prefix)) = :prefix
-                    AND (length(a.url) = length(:prefix)
-                      OR substr(a.url, length(:prefix) + 1, 1) IN ('/', '?', '#')
-                      OR (substr(a.url, length(:prefix) + 1, 1) = ',' AND substr(a.url, length(:prefix) + 2, 1) = '{'))
-                )
-                AND EXISTS (
-                    SELECT 1 FROM chapters b
-                    WHERE b.bookUrl = a.bookUrl
-                      AND b.url = :newPrefix || substr(a.url, length(:prefix) + 1)
-                      AND b.`index` < a.`index`
-                )
-              OR (
-                    substr(a.url, 1, length(:newPrefix)) = :newPrefix
-                    AND EXISTS (
-                        SELECT 1 FROM chapters b
-                        WHERE b.bookUrl = a.bookUrl
-                          AND substr(b.url, 1, length(:prefix)) = :prefix
-                          AND (length(b.url) = length(:prefix)
-                            OR substr(b.url, length(:prefix) + 1, 1) IN ('/', '?', '#')
-                            OR (substr(b.url, length(:prefix) + 1, 1) = ',' AND substr(b.url, length(:prefix) + 2, 1) = '{'))
-                          AND b.url = :prefix || substr(a.url, length(:newPrefix) + 1)
-                          AND b.`index` < a.`index`
-                    )
-                )
+          AND substr(a.url, 1, length(:prefix)) = :prefix
+          AND (length(a.url) = length(:prefix)
+            OR substr(a.url, length(:prefix) + 1, 1) IN ('/', '?', '#')
+            OR (substr(a.url, length(:prefix) + 1, 1) = ',' AND substr(a.url, length(:prefix) + 2, 1) = '{'))
+          AND EXISTS (
+              SELECT 1 FROM chapters b
+              WHERE b.bookUrl = a.bookUrl
+                AND b.url = :newPrefix || substr(a.url, length(:prefix) + 1)
           )
           ORDER BY `index`
         """

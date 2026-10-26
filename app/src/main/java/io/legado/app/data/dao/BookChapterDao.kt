@@ -121,6 +121,27 @@ interface BookChapterDao {
         newPrefix: String,
     ): List<String>
 
+    /** 章节去重配套：抬升受影响书籍的全部章节 index 到高位空区（为紧凑重排腾位） */
+    @Query(DomainReplaceSql.LIFT_CHAPTER_INDEXES)
+    fun liftChapterIndexes(prefix: String, newPrefix: String, offset: Int): Int
+
+    /** 章节去重配套：按幸存相对顺序把高位空区的章节紧凑重排为 0..K-1 */
+    @Query(DomainReplaceSql.SETTLE_CHAPTER_INDEXES)
+    fun settleChapterIndexes(offset: Int): Int
+
+    /** [liftChapterIndexes] 的单本书版本（单本完成替换用） */
+    @Query(DomainReplaceSql.LIFT_CHAPTER_INDEXES_FOR_BOOK)
+    fun liftChapterIndexesForBook(
+        bookUrl: String,
+        prefix: String,
+        newPrefix: String,
+        offset: Int,
+    ): Int
+
+    /** [settleChapterIndexes] 的单本书版本（单本完成替换用） */
+    @Query(DomainReplaceSql.SETTLE_CHAPTER_INDEXES_FOR_BOOK)
+    fun settleChapterIndexesForBook(bookUrl: String, offset: Int): Int
+
     /** 单本书范围把 chapters.url 的前缀 [prefix] 整段换成 [newPrefix] */
     @Query(DomainReplaceSql.REPLACE_CHAPTER_URL_DOMAIN_FOR_BOOK)
     fun replaceChapterUrlDomainForBook(

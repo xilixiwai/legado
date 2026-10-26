@@ -573,11 +573,21 @@ class DomainReplaceViewModel(
                 execSql = { appDb.openHelper.writableDatabase.execSQL(it) },
                 apply = { statement ->
                     when (statement) {
+                        is DomainReplaceStatement.ChapterDedupLift ->
+                            appDb.bookChapterDao.liftChapterIndexes(
+                                statement.prefix,
+                                statement.newPrefix,
+                                statement.offset,
+                            )
+
                         is DomainReplaceStatement.ChapterUrlDedupe ->
                             appDb.bookChapterDao.deleteDuplicateChapterUrls(
                                 statement.prefix,
                                 statement.newPrefix,
                             )
+
+                        is DomainReplaceStatement.ChapterDedupSettle ->
+                            appDb.bookChapterDao.settleChapterIndexes(statement.offset)
 
                         is DomainReplaceStatement.ChapterUrl ->
                             appDb.bookChapterDao.replaceChapterUrlDomain(
@@ -1110,11 +1120,19 @@ class DomainReplaceViewModel(
                 chapterFieldChanges(appDb.bookChapterDao.domainGroupsOfChapterBaseUrl(), rule)
             val resourceUrlChanges =
                 chapterFieldChanges(appDb.bookChapterDao.domainGroupsOfChapterResourceUrl(), rule)
-            // 先修正阅读位置（快照在删除之前），再删除撞键的旧域名重复行，再做改写
+            // 先修正阅读位置（快照在删除之前），再删除撞键的旧域名重复行（保留新域名行）、
+            // 紧凑重排 index，再做改写
             applySingleBookDedupeProgressFix(oldBook.bookUrl, urlChanges)
             urlChanges.forEach { change ->
+                appDb.bookChapterDao.liftChapterIndexesForBook(
+                    oldBook.bookUrl, change.prefix, change.newPrefix,
+                    DomainReplaceExecutor.INDEX_COMPACT_OFFSET,
+                )
                 chapterUrlDuplicates += appDb.bookChapterDao.deleteDuplicateChapterUrlsForBook(
                     oldBook.bookUrl, change.prefix, change.newPrefix,
+                )
+                appDb.bookChapterDao.settleChapterIndexesForBook(
+                    oldBook.bookUrl, DomainReplaceExecutor.INDEX_COMPACT_OFFSET,
                 )
                 chapterUrl += appDb.bookChapterDao.replaceChapterUrlDomainForBook(
                     oldBook.bookUrl, change.prefix, change.newPrefix,

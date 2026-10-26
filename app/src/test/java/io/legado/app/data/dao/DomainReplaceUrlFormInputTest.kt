@@ -262,9 +262,23 @@ class DomainReplaceUrlFormInputTest {
 
     private fun applyStatement(statement: DomainReplaceStatement): Int {
         return when (statement) {
+            is DomainReplaceStatement.ChapterDedupLift -> conn.exec(
+                DomainReplaceSql.LIFT_CHAPTER_INDEXES,
+                mapOf(
+                    "prefix" to statement.prefix,
+                    "newPrefix" to statement.newPrefix,
+                    "offset" to statement.offset.toString(),
+                )
+            )
+
             is DomainReplaceStatement.ChapterUrlDedupe -> conn.exec(
                 DomainReplaceSql.DELETE_DUPLICATE_CHAPTER_URLS,
                 mapOf("prefix" to statement.prefix, "newPrefix" to statement.newPrefix)
+            )
+
+            is DomainReplaceStatement.ChapterDedupSettle -> conn.exec(
+                DomainReplaceSql.SETTLE_CHAPTER_INDEXES,
+                mapOf("offset" to statement.offset.toString())
             )
 
             is DomainReplaceStatement.ChapterUrl -> conn.exec(

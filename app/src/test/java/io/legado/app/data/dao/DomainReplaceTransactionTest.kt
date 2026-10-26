@@ -184,14 +184,21 @@ class DomainReplaceTransactionTest {
             )
         )
 
-        // 本轮起章节级冲突不再让整批失败：去重删除 index 较大的新域名重复行
+        // 本轮起章节级冲突不再让整批失败：删除旧域名重复行，保留新域名行
         val counts = executePlan(buildPlan())
         assertEquals(1, counts.chapterUrlDuplicates)
+        assertEquals(1, counts.chapterUrl)
 
-        // 幸存的是 index 较小的旧行（改写后成为新域名地址），注入的重复章被删除
+        // 幸存行按原相对顺序紧凑重排：a1（原 index 1）→ 0，保留的新域名行（原 index 9）→ 1
         assertEquals(
-            listOf("http://new.com/ch/0.html", "http://new.com/ch/1.html"),
+            listOf("http://new.com/ch/1.html", "http://new.com/ch/0.html"),
             conn.strings("select url from chapters order by `index`")
+        )
+        assertEquals(listOf(0, 1), ints("select `index` from chapters order by `index`"))
+        // 保留新域名行的身份与标题（旧记录标题随之删除，不反向覆盖）
+        assertEquals(
+            "重复章",
+            single("select title from chapters where url = 'http://new.com/ch/0.html'")
         )
         assertEquals(newBookUrl, single("select bookUrl from books"))
         assertEquals(emptyList<String>(), conn.foreignKeyViolations())
@@ -212,8 +219,10 @@ class DomainReplaceTransactionTest {
                     execSql = { conn.execRaw(it) },
                     apply = { statement ->
                         executed++
-                        // 第 3 条（resourceUrl 之后的第一条 books 更新）注入异常
-                        if (executed == 3) throw IllegalStateException("注入异常")
+                        // 第一条 books 主键更新处注入异常（其前：lift/dedupe/settle/url/base）
+                        if (statement is DomainReplaceStatement.BookUrls) {
+                            throw IllegalStateException("注入异常")
+                        }
                         applyStatement(statement)
                     }
                 )
@@ -223,9 +232,10 @@ class DomainReplaceTransactionTest {
             }
         }
         assertEquals("注入异常", error.message)
-        assertEquals(3, executed)
+        // lift/dedupe/settle/url + base = 6 条（本种子无 resourceUrl 分组），第 7 条 books 注入异常
+        assertEquals(6, executed)
 
-        // 前两条 UPDATE 已实际执行过，必须被回滚
+        // 前面已实际执行过的更新（含章节地址改写）必须被回滚
         assertEquals(
             listOf("http://old.com/ch/0.html", "http://old.com/ch/1.html"),
             conn.strings("select url from chapters order by `index`")
@@ -234,6 +244,8 @@ class DomainReplaceTransactionTest {
             listOf("http://old.com", "http://old.com"),
             conn.strings("select baseUrl from chapters order by `index`")
         )
+        // index 的抬升/重排同样不留残迹
+        assertEquals(listOf(0, 1), ints("select `index` from chapters order by `index`"))
         assertEquals(oldBookUrl, single("select bookUrl from books"))
     }
 
@@ -252,7 +264,9 @@ class DomainReplaceTransactionTest {
                 execSql = { conn.execRaw(it) },
                 apply = { statement ->
                     executed++
-                    if (executed == 2) throw SQLException("模拟写入失败")
+                    if (statement is DomainReplaceStatement.ChapterUrl) {
+                        throw SQLException("模拟写入失败")
+                    }
                     applyStatement(statement)
                 }
             )
@@ -378,12 +392,18 @@ class DomainReplaceTransactionTest {
             )
         )
 
-        // 执行：章节级过期冲突按 index 自动去重，整批完成；书籍级冲突仍由约束兜底（用例 2）
+        // 执行：章节级过期冲突自动去重（删除旧域名行、保留新域名行），整批完成；
+        // 书籍级冲突仍由约束兜底（用例 2）
         val counts = executePlan(buildPlan())
         assertEquals(1, counts.chapterUrlDuplicates)
         assertEquals(
-            listOf("http://new.com/ch/0.html", "http://new.com/ch/1.html"),
+            listOf("http://new.com/ch/1.html", "http://new.com/ch/0.html"),
             conn.strings("select url from chapters order by `index`")
+        )
+        // 保留的是他处写入的新域名行（身份与标题不动）
+        assertEquals(
+            "他处写入",
+            single("select title from chapters where url = 'http://new.com/ch/0.html'")
         )
         assertEquals(newBookUrl, single("select bookUrl from books"))
         assertEquals(emptyList<String>(), conn.foreignKeyViolations())
@@ -392,6 +412,8 @@ class DomainReplaceTransactionTest {
     // ------------------------------------------------------------------ 内部
 
     private fun single(sql: String): String = conn.strings(sql).single()
+
+    private fun ints(sql: String): List<Int> = conn.strings(sql).map { it.toInt() }
 
     private fun buildPlan(): DomainReplacePlan {
         val rule = when (val r = UrlDomainReplacement.normalize("old.com", "new.com")) {
@@ -431,9 +453,23 @@ class DomainReplaceTransactionTest {
 
     private fun applyStatement(statement: DomainReplaceStatement): Int {
         return when (statement) {
+            is DomainReplaceStatement.ChapterDedupLift -> conn.exec(
+                DomainReplaceSql.LIFT_CHAPTER_INDEXES,
+                mapOf(
+                    "prefix" to statement.prefix,
+                    "newPrefix" to statement.newPrefix,
+                    "offset" to statement.offset.toString(),
+                )
+            )
+
             is DomainReplaceStatement.ChapterUrlDedupe -> conn.exec(
                 DomainReplaceSql.DELETE_DUPLICATE_CHAPTER_URLS,
                 mapOf("prefix" to statement.prefix, "newPrefix" to statement.newPrefix)
+            )
+
+            is DomainReplaceStatement.ChapterDedupSettle -> conn.exec(
+                DomainReplaceSql.SETTLE_CHAPTER_INDEXES,
+                mapOf("offset" to statement.offset.toString())
             )
 
             is DomainReplaceStatement.ChapterUrl -> conn.exec(

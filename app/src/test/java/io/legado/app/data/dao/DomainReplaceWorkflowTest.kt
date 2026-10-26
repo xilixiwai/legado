@@ -139,9 +139,23 @@ class DomainReplaceWorkflowTest {
 
     private fun applyStatement(statement: DomainReplaceStatement): Int {
         return when (statement) {
+            is DomainReplaceStatement.ChapterDedupLift -> conn.exec(
+                DomainReplaceSql.LIFT_CHAPTER_INDEXES,
+                mapOf(
+                    "prefix" to statement.prefix,
+                    "newPrefix" to statement.newPrefix,
+                    "offset" to statement.offset.toString(),
+                )
+            )
+
             is DomainReplaceStatement.ChapterUrlDedupe -> conn.exec(
                 DomainReplaceSql.DELETE_DUPLICATE_CHAPTER_URLS,
                 mapOf("prefix" to statement.prefix, "newPrefix" to statement.newPrefix)
+            )
+
+            is DomainReplaceStatement.ChapterDedupSettle -> conn.exec(
+                DomainReplaceSql.SETTLE_CHAPTER_INDEXES,
+                mapOf("offset" to statement.offset.toString())
             )
 
             is DomainReplaceStatement.ChapterUrl -> conn.exec(
@@ -239,6 +253,11 @@ class DomainReplaceWorkflowTest {
             listOf("https://new.com/ch/x0.html"),
             conn.strings("select url from chapters where bookUrl = 'https://new.com/book/2'")
         )
+        // 未发生去重的书籍 index 不被抬升/重排波及（书B）
+        assertEquals(
+            listOf(0, 1),
+            ints("select `index` from chapters where bookUrl = 'https://old.com/book/2' order by `index`")
+        )
     }
 
     // ------------------------------------------------------------------ 3/4. 章节去重与进度修正
@@ -262,24 +281,32 @@ class DomainReplaceWorkflowTest {
         val counts = executePlan(buildPlan(excludeBookUrls = setOf("https://old.com/book/2")))
 
         assertEquals(1, counts.chapterUrlDuplicates)
-        // 书A 幸存的 2 行 + 书B 的 2 行都被改写（书B 走全局章节改写，与 ViewModel 行为一致）
-        assertEquals(4, counts.chapterUrl)
+        // 书A 幸存 1 行（a1）+ 书B 的 2 行被改写（书B 走全局章节改写，与 ViewModel 行为一致）
+        assertEquals(3, counts.chapterUrl)
         // 计划口径（改写 + 去重）与实际一致
-        assertEquals(5, counts.chapterUrl + counts.chapterUrlDuplicates)
+        assertEquals(4, counts.chapterUrl + counts.chapterUrlDuplicates)
         // 重复行被删除：总数 = 之前 - 1
         assertEquals(beforeUrlCount - 1, conn.scalar("select count(*) from chapters"))
+        // 保留新域名行：幸存行按原相对顺序紧凑重排
+        // （old a1 原 index 1 → 0；新域名重复行原 index 5 → 1；删除的 old a0 留下的洞被闭合）
         assertEquals(
-            listOf("https://new.com/ch/a0.html", "https://new.com/ch/a1.html"),
+            listOf("https://new.com/ch/a1.html", "https://new.com/ch/a0.html"),
             conn.strings("select url from chapters where bookUrl = 'https://new.com/book/1' order by `index`")
         )
-        // 保留 index 较小的旧行（目录顺序连续），删除 index 较大的新域名重复行
+        assertEquals(listOf(0, 1), ints("select `index` from chapters where bookUrl = 'https://new.com/book/1' order by `index`"))
+        // 保留的是新域名行的身份与标题（旧记录字段不反向覆盖新记录）
         assertEquals(
-            "第0章",
+            "重复章",
             single("select title from chapters where url = 'https://new.com/ch/a0.html' and bookUrl = 'https://new.com/book/1'")
         )
         assertEquals(
             0,
-            conn.scalar("select count(*) from chapters where title = '重复章'")
+            conn.scalar("select count(*) from chapters where title = '第0章' and bookUrl = 'https://new.com/book/1'")
+        )
+        // 未发生去重的书籍 index 不被重排波及（书X）
+        assertEquals(
+            listOf(0),
+            ints("select `index` from chapters where bookUrl = 'https://new.com/book/2'")
         )
         assertEquals(emptyList<String>(), conn.foreignKeyViolations())
     }
@@ -317,6 +344,8 @@ class DomainReplaceWorkflowTest {
         )
         // 阅读位置指向第 4 行（index=3，将被删除的 a3 旧行）
         conn.exec("update books set durChapterIndex = 3 where bookUrl = 'https://old.com/book/1'")
+        // 书签挂在重复章之一：去重不得丢失关联数据
+        conn.insertBookmarkedRow("书A", "作者A", 3, "https://old.com/ch/a3.html")
 
         conn.autoCommit = false
         try {
@@ -351,8 +380,20 @@ class DomainReplaceWorkflowTest {
                 DomainReplaceExecutor.changes(conn.groups(DomainReplaceSql.CHAPTER_URL_GROUPS), rule)
             urlChanges.forEach { change ->
                 conn.exec(
+                    DomainReplaceSql.LIFT_CHAPTER_INDEXES,
+                    mapOf(
+                        "prefix" to change.prefix,
+                        "newPrefix" to change.newPrefix,
+                        "offset" to DomainReplaceExecutor.INDEX_COMPACT_OFFSET.toString(),
+                    )
+                )
+                conn.exec(
                     DomainReplaceSql.DELETE_DUPLICATE_CHAPTER_URLS,
                     mapOf("prefix" to change.prefix, "newPrefix" to change.newPrefix)
+                )
+                conn.exec(
+                    DomainReplaceSql.SETTLE_CHAPTER_INDEXES,
+                    mapOf("offset" to DomainReplaceExecutor.INDEX_COMPACT_OFFSET.toString())
                 )
                 conn.exec(
                     DomainReplaceSql.REPLACE_CHAPTER_URL_DOMAIN,
@@ -361,7 +402,7 @@ class DomainReplaceWorkflowTest {
             }
             conn.commit()
 
-            // 幸存序列：a0、a1（旧域名改写）+ a2、a3（保留的新域名行）
+            // 幸存序列：a0、a1（旧域名改写）+ a2、a3（保留的新域名行），index 紧凑 0..3
             val finalUrls = conn.strings(
                 "select url from chapters where bookUrl = 'https://old.com/book/1' and url like 'https://new.com/%' order by `index`"
             )
@@ -374,15 +415,114 @@ class DomainReplaceWorkflowTest {
                 ),
                 finalUrls
             )
-            // 位置 3 指向的章节路径 /ch/a3.html 在幸存序列中仍是第 4 行
+            assertEquals(
+                listOf(0, 1, 2, 3),
+                ints("select `index` from chapters where bookUrl = 'https://old.com/book/1' order by `index`")
+            )
+            // 位置 3 指向的章节路径 /ch/a3.html 在幸存序列中仍是第 4 行——
+            // 保留的是新域名行，进度标题来自它的快照
             assertEquals(3, conn.scalar("select durChapterIndex from books where bookUrl = 'https://old.com/book/1'"))
-            assertEquals("第3章", single("select durChapterTitle from books where bookUrl = 'https://old.com/book/1'"))
+            assertEquals("重复章3", single("select durChapterTitle from books where bookUrl = 'https://old.com/book/1'"))
+            // 关联数据未丢失：书签仍挂在原书名下
+            assertEquals(
+                1,
+                conn.scalar("select count(*) from bookmarks where bookName = '书A' and bookAuthor = '作者A'")
+            )
         } finally {
             conn.autoCommit = true
         }
     }
 
     // ------------------------------------------------------------------ 5. A1 清理
+
+    @Test
+    fun `跨书同路径不构成去重证据_独有章节不删`() {
+        // 另一本书（书X）里存在同路径的新域名行：跨书不构成「同一章节」的证据，
+        // 书A 的旧域名行不去重、不删除，改写后也不与别的书撞键（主键按书隔离）
+        conn.insertChapter(
+            mapOf(
+                "url" to "https://new.com/ch/a0.html",
+                "title" to "别家的同名路径",
+                "isVolume" to "0",
+                "baseUrl" to "https://new.com",
+                "bookUrl" to "https://new.com/book/2",
+                "index" to "1",
+                "isVip" to "0",
+                "isPay" to "0",
+            )
+        )
+        val counts = executePlan(buildPlan(excludeBookUrls = setOf("https://old.com/book/2")))
+
+        assertEquals(0, counts.chapterUrlDuplicates)
+        // 书A 两行都是独有章节：照常改写，无删除
+        assertEquals(
+            listOf("https://new.com/ch/a0.html", "https://new.com/ch/a1.html"),
+            conn.strings("select url from chapters where bookUrl = 'https://new.com/book/1' order by `index`")
+        )
+        assertEquals(
+            2,
+            conn.scalar("select count(*) from chapters where bookUrl = 'https://new.com/book/1'")
+        )
+        // 书X 的行原样保留（含注入的同路径行）
+        assertEquals(
+            2,
+            conn.scalar("select count(*) from chapters where bookUrl = 'https://new.com/book/2'")
+        )
+        assertEquals(
+            "别家的同名路径",
+            single("select title from chapters where url = 'https://new.com/ch/a0.html' and bookUrl = 'https://new.com/book/2'")
+        )
+        assertEquals(emptyList<String>(), conn.foreignKeyViolations())
+    }
+
+    @Test
+    fun `多个重复章删除后索引重排连续且有序`() {
+        // 书A 扩到 6 章（index 0..5），其中 3 章有新域名重复行（index 7..9，部分迁移形态）
+        (2..5).forEach { i ->
+            conn.insertChapter(
+                mapOf(
+                    "url" to "https://old.com/ch/a$i.html", "title" to "第${i}章", "isVolume" to "0",
+                    "baseUrl" to "https://old.com", "bookUrl" to "https://old.com/book/1",
+                    "index" to i.toString(), "isVip" to "0", "isPay" to "0",
+                )
+            )
+        }
+        (2..4).forEach { i ->
+            conn.insertChapter(
+                mapOf(
+                    "url" to "https://new.com/ch/a$i.html", "title" to "重复章$i", "isVolume" to "0",
+                    "baseUrl" to "https://new.com", "bookUrl" to "https://old.com/book/1",
+                    "index" to (i + 5).toString(), "isVip" to "0", "isPay" to "0",
+                )
+            )
+        }
+        val counts = executePlan(buildPlan(excludeBookUrls = setOf("https://old.com/book/2")))
+
+        assertEquals(3, counts.chapterUrlDuplicates)
+        // 幸存 6 行：a0/a1/a5（旧行改写）+ 重复章2/3/4（新域名行保留），index 紧凑 0..5
+        assertEquals(6, conn.scalar("select count(*) from chapters where bookUrl = 'https://new.com/book/1'"))
+        assertEquals(
+            listOf(0, 1, 2, 3, 4, 5),
+            ints("select `index` from chapters where bookUrl = 'https://new.com/book/1' order by `index`")
+        )
+        assertEquals(
+            listOf(
+                "https://new.com/ch/a0.html",
+                "https://new.com/ch/a1.html",
+                "https://new.com/ch/a5.html",
+                "https://new.com/ch/a2.html",
+                "https://new.com/ch/a3.html",
+                "https://new.com/ch/a4.html",
+            ),
+            conn.strings("select url from chapters where bookUrl = 'https://new.com/book/1' order by `index`")
+        )
+        // 未发生去重的书籍不受重排影响
+        assertEquals(
+            listOf(0, 1),
+            ints("select `index` from chapters where bookUrl = 'https://old.com/book/2' order by `index`")
+        )
+        assertEquals(emptyList<String>(), conn.foreignKeyViolations())
+    }
 
     @Test
     fun `A1清理_级联删章节_进度分组书签统计迁移_目标章节不动`() {
@@ -538,11 +678,27 @@ class DomainReplaceWorkflowTest {
                 DomainReplaceExecutor.changes(conn.groups(DomainReplaceSql.CHAPTER_URL_GROUPS), rule)
             urlChanges.forEach { change ->
                 conn.exec(
+                    DomainReplaceSql.LIFT_CHAPTER_INDEXES_FOR_BOOK,
+                    mapOf(
+                        "bookUrl" to "https://old.com/book/2",
+                        "prefix" to change.prefix,
+                        "newPrefix" to change.newPrefix,
+                        "offset" to DomainReplaceExecutor.INDEX_COMPACT_OFFSET.toString(),
+                    )
+                )
+                conn.exec(
                     DomainReplaceSql.DELETE_DUPLICATE_CHAPTER_URLS_FOR_BOOK,
                     mapOf(
                         "bookUrl" to "https://old.com/book/2",
                         "prefix" to change.prefix,
                         "newPrefix" to change.newPrefix,
+                    )
+                )
+                conn.exec(
+                    DomainReplaceSql.SETTLE_CHAPTER_INDEXES_FOR_BOOK,
+                    mapOf(
+                        "bookUrl" to "https://old.com/book/2",
+                        "offset" to DomainReplaceExecutor.INDEX_COMPACT_OFFSET.toString(),
                     )
                 )
                 conn.exec(
@@ -628,6 +784,8 @@ class DomainReplaceWorkflowTest {
     }
 
     private fun single(sql: String): String = conn.strings(sql).single()
+
+    private fun ints(sql: String): List<Int> = conn.strings(sql).map { it.toInt() }
 
     // ------------------------------------------------------------------ bookmarks/readRecord 种子
 

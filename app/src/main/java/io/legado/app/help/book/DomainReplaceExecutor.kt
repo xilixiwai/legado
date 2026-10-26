@@ -71,10 +71,30 @@ data class DomainReplacePlan(
             ChapterField()
 
         /**
-         * 章节主键冲突去重：删除改写后会与同书已有新域名行撞 `(url, bookUrl)` 键的旧域名重复行。
-         * 必须先于同前缀的 [ChapterUrl] 执行；影响行数单独计数并报告。
+         * 章节主键冲突去重：删除改写后会与同书已有新域名行撞 `(url, bookUrl)` 键的
+         * 旧域名重复行，**保留新域名行**（迁移目的地，身份/URL/元数据不动）。
+         * 自动删除的证据 = 同一本书 + 用户声明的域名映射 + 规范化路径相同；
+         * 必须夹在同前缀的 [ChapterDedupLift] / [ChapterDedupSettle] 之间执行；
+         * 影响行数单独计数并报告。
          */
         data class ChapterUrlDedupe(val prefix: String, val newPrefix: String) :
+            DomainReplaceStatement()
+
+        /**
+         * 章节去重配套第一步：把存在将删除重复行的书籍的全部章节 `index` 抬升到
+         * [offset] 起的高位空区，为删除后的紧凑重排腾出低位（详见 SQL KDoc）。
+         */
+        data class ChapterDedupLift(
+            val prefix: String,
+            val newPrefix: String,
+            val offset: Int = DomainReplaceExecutor.INDEX_COMPACT_OFFSET,
+        ) : DomainReplaceStatement()
+
+        /**
+         * 章节去重配套第二步：仍停留在高位空区的章节行按幸存相对顺序
+         * 紧凑重排为 `0..K-1`，消除删除旧域名行留下的 `index` 空洞。
+         */
+        data class ChapterDedupSettle(val offset: Int = DomainReplaceExecutor.INDEX_COMPACT_OFFSET) :
             DomainReplaceStatement()
 
         data class BookUrls(val oldBookUrl: String, val newBookUrl: String, val newTocUrl: String) :
@@ -116,6 +136,13 @@ object DomainReplaceExecutor {
     const val DEFER_FOREIGN_KEYS = "PRAGMA defer_foreign_keys = ON"
 
     /**
+     * 章节去重紧凑重排的高位空区起点。任何一本书的章节数都远小于该值，
+     * 抬升后的目标区间必然为空，重排的每个目标位也都为空，
+     * 因此两步 UPDATE 都不依赖 SQLite 的行更新顺序。
+     */
+    const val INDEX_COMPACT_OFFSET = 1_000_000_000
+
+    /**
      * 把 SQL 分组结果（每行一个 authority）转成待更新的分组。
      *
      * 章节表可能有几十万行，但 authority 种类通常只有个位数，
@@ -142,10 +169,13 @@ object DomainReplaceExecutor {
         }
     }
 
-    /** 按固定顺序展开全部写操作，便于测试直接断言顺序 */
+    /** 按固定顺序展开全部写操作（与 [run] 的发射顺序一致），便于测试直接断言顺序 */
     fun statements(plan: DomainReplacePlan): List<DomainReplaceStatement> {
         val list = ArrayList<DomainReplaceStatement>()
         plan.urlChanges.forEach {
+            list.add(DomainReplaceStatement.ChapterDedupLift(it.prefix, it.newPrefix))
+            list.add(DomainReplaceStatement.ChapterUrlDedupe(it.prefix, it.newPrefix))
+            list.add(DomainReplaceStatement.ChapterDedupSettle())
             list.add(DomainReplaceStatement.ChapterUrl(it.prefix, it.newPrefix))
         }
         plan.baseUrlChanges.forEach {
@@ -181,11 +211,14 @@ object DomainReplaceExecutor {
         var chapterBookUrl = 0
         var chapterUrlDuplicates = 0
 
-        // 1. 章节地址：不参与外键，先改；url 列先去重（删除撞键的旧域名重复行）再改写
+        // 1. 章节地址：不参与外键，先改。每个前缀组内：抬升 index → 删除撞键的
+        //    旧域名重复行（保留新域名行）→ 紧凑重排 index → 改写 url
         plan.urlChanges.forEach {
+            apply(DomainReplaceStatement.ChapterDedupLift(it.prefix, it.newPrefix))
             chapterUrlDuplicates += apply(
                 DomainReplaceStatement.ChapterUrlDedupe(it.prefix, it.newPrefix)
             )
+            apply(DomainReplaceStatement.ChapterDedupSettle())
             chapterUrl += apply(DomainReplaceStatement.ChapterUrl(it.prefix, it.newPrefix))
         }
         plan.baseUrlChanges.forEach {
