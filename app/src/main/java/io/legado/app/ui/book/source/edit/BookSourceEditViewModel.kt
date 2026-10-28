@@ -17,6 +17,7 @@ import io.legado.app.help.source.clearExploreKindsCache
 import io.legado.app.help.storage.ImportOldData
 import io.legado.app.model.SharedJsScope
 import io.legado.app.utils.GSON
+import io.legado.app.utils.SourceDiag
 import io.legado.app.utils.fromJsonArray
 import io.legado.app.utils.fromJsonObject
 import io.legado.app.utils.getClipText
@@ -72,6 +73,7 @@ class BookSourceEditViewModel(application: Application) : BaseViewModel(applicat
 
             // 换域名前检查新 URL 是否已被其他书源占用
             if (urlChanged && appDb.bookSourceDao.has(source.bookSourceUrl)) {
+                SourceDiag.sourceSaveBlocked(source.bookSourceUrl, "target-url-exists")
                 throw NoStackTraceException(
                     "目标书源 URL 已存在：${source.bookSourceUrl}"
                 )
@@ -85,6 +87,10 @@ class BookSourceEditViewModel(application: Application) : BaseViewModel(applicat
 
             // 迁移前捕获受影响的书籍，用于事务后迁移缓存目录
             val oldBooks = if (urlChanged) appDb.bookDao.getByOrigin(oldUrl) else emptyList()
+
+            // [诊断] 只记录，不参与任何判定
+            SourceDiag.sourceSave(oldUrl, source.bookSourceUrl, urlChanged)
+            if (urlChanged) SourceDiag.migrateBegin(oldBooks.size)
 
             // 所有 DB 操作在一个事务内，确保原子性
             var lastStep = 0
@@ -102,9 +108,11 @@ class BookSourceEditViewModel(application: Application) : BaseViewModel(applicat
                         // 2 同步更新 chapters.bookUrl（FK: chapters.bookUrl → books.bookUrl）
                         val chapterCount = appDb.bookChapterDao.replaceChapterUrls(oldUrl, source.bookSourceUrl); lastStep = 2
                         android.util.Log.i(tag, "migrated $chapterCount chapters bookUrl from $oldUrl")
+                        SourceDiag.migrateStep(2, "chapters=$chapterCount")
                         // 3 替换 books.bookUrl + tocUrl（带上 WHERE origin=oldUrl 限定范围）
                         val bookCount = appDb.bookDao.replaceBookUrls(oldUrl, source.bookSourceUrl); lastStep = 3
                         android.util.Log.i(tag, "migrated $bookCount books bookUrl, tocUrl from $oldUrl")
+                        SourceDiag.migrateStep(3, "books=$bookCount")
                         // 4 更新 books.origin
                         appDb.bookDao.updateBookSourceUrl(oldUrl, source.bookSourceUrl); lastStep = 4
                         // 5 更新 searchBooks 的 origin（避免后续 FK 级联删除搜索缓存）
@@ -121,10 +129,14 @@ class BookSourceEditViewModel(application: Application) : BaseViewModel(applicat
                     }
                 }
             } catch (e: Exception) {
+                SourceDiag.migrateFail(lastStep + 1, oldUrl, source.bookSourceUrl, e)
                 throw NoStackTraceException(
                     "step${lastStep + 1} failed[$oldUrl->${source.bookSourceUrl}]: ${e.message}"
                 )
             }
+
+            // [诊断] runInTransaction 已返回，事务确认提交后才记录成功语义
+            if (urlChanged) SourceDiag.migrateCommit(oldUrl, source.bookSourceUrl)
 
             bookSource = source
 

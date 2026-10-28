@@ -15,6 +15,7 @@ import io.legado.app.data.entities.SearchBook
 import io.legado.app.databinding.ItemChangeSourceBinding
 import io.legado.app.help.config.AppConfig
 import io.legado.app.lib.dialogs.alert
+import io.legado.app.utils.SourceDiag
 import io.legado.app.utils.getCompatColor
 import io.legado.app.utils.gone
 import io.legado.app.utils.invisible
@@ -176,6 +177,8 @@ class ChangeBookSourceAdapter(
         }
         holder.itemView.setOnClickListener {
             getItem(holder.layoutPosition)?.let {
+                // [诊断] 只记录点击判定结果，条件本身保持原样
+                SourceDiag.click(it.bookUrl, callBack.oldBookUrl, it.origin, callBack.oldBookOrigin)
                 if (it.bookUrl != callBack.oldBookUrl) {
                     callBack.changeTo(it)
                 }
@@ -224,6 +227,9 @@ class ChangeBookSourceAdapter(
 
     interface CallBack {
         val oldBookUrl: String?
+
+        /** 仅用于诊断：当前书籍的 origin，用来区分「地址相同但书源不同」 */
+        val oldBookOrigin: String?
         fun changeTo(searchBook: SearchBook)
         fun topSource(searchBook: SearchBook)
         fun bottomSource(searchBook: SearchBook)

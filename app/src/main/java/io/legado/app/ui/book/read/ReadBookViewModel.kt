@@ -35,6 +35,7 @@ import io.legado.app.ui.book.searchContent.SearchResult
 import io.legado.app.utils.DocumentUtils
 import io.legado.app.utils.FileUtils
 import io.legado.app.utils.ReadProgressLog
+import io.legado.app.utils.SourceDiag
 import io.legado.app.utils.isContentScheme
 import io.legado.app.utils.mapParallelSafe
 import io.legado.app.utils.postEvent
@@ -169,6 +170,10 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
             if (ReadBook.chapterSize == 0) {
                 ReadBook.upMsg(context.getString(R.string.error_no_source))
             }
+            SourceDiag.lookup(
+                "readBook", book.bookUrl, book.origin, false,
+                extra = "chapterSize=${ReadBook.chapterSize}", dedupe = true
+            )
             autoChangeSource(book.name, book.author)
             return
         }

@@ -36,6 +36,7 @@ import io.legado.app.ui.book.source.manage.BookSourceActivity
 import io.legado.app.ui.widget.dialog.WaitDialog
 import io.legado.app.ui.widget.recycler.VerticalDivider
 import io.legado.app.utils.ColorUtils
+import io.legado.app.utils.SourceDiag
 import io.legado.app.utils.StartActivityContract
 import io.legado.app.utils.applyTint
 import io.legado.app.utils.dpToPx
@@ -350,6 +351,9 @@ class ChangeBookSourceDialog() : BaseDialogFragment(R.layout.dialog_book_change_
     override val oldBookUrl: String?
         get() = callBack?.oldBook?.bookUrl
 
+    override val oldBookOrigin: String?
+        get() = callBack?.oldBook?.origin
+
     override fun topSource(searchBook: SearchBook) {
         viewModel.topSource(searchBook)
     }
@@ -389,6 +393,12 @@ class ChangeBookSourceDialog() : BaseDialogFragment(R.layout.dialog_book_change_
         waitDialog.setText(R.string.load_toc)
         waitDialog.show()
         val book = viewModel.bookMap[searchBook.primaryStr()] ?: searchBook.toBook()
+        SourceDiag.changeSource(
+            "begin",
+            "search=${SourceDiag.maskUrl(searchBook.origin)} " +
+                    "old=${SourceDiag.fingerprint(oldBookUrl)} " +
+                    "book=${SourceDiag.fingerprint(book.bookUrl)}"
+        )
         val coroutine = viewModel.getToc(book, { toc, source ->
             waitDialog.dismiss()
             callBack?.changeTo(source, book, toc)

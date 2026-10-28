@@ -64,6 +64,7 @@ import io.legado.app.utils.ConvertUtils
 import io.legado.app.utils.FileDoc
 import io.legado.app.utils.GSON
 import io.legado.app.utils.ReadProgressLog
+import io.legado.app.utils.SourceDiag
 import io.legado.app.utils.StartActivityContract
 import io.legado.app.utils.applyNavigationBarPadding
 import io.legado.app.utils.dpToPx
@@ -470,6 +471,7 @@ class BookInfoActivity :
             viewModel.getBook()?.let { book ->
                 if (book.isLocal) return@let
                 if (!appDb.bookSourceDao.has(book.origin)) {
+                    SourceDiag.lookup("originClick", book.bookUrl, book.origin, false)
                     toastOnUi(R.string.error_no_source)
                     return@let
                 }

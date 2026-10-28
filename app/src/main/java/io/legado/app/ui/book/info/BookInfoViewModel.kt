@@ -38,6 +38,7 @@ import io.legado.app.model.localBook.LocalBook
 import io.legado.app.model.webBook.WebBook
 import io.legado.app.utils.ArchiveUtils
 import io.legado.app.utils.ReadProgressLog
+import io.legado.app.utils.SourceDiag
 import io.legado.app.utils.UrlUtil
 import io.legado.app.utils.isContentScheme
 import io.legado.app.utils.postEvent
@@ -181,6 +182,7 @@ class BookInfoViewModel(application: Application) : BaseViewModel(application) {
             loadChapter(book)
         } else {
             val bookSource = bookSource ?: let {
+                SourceDiag.lookup("loadBookInfo", book.bookUrl, book.origin, false)
                 chapterListData.postValue(emptyList())
                 context.toastOnUi(R.string.error_no_source)
                 return
@@ -243,6 +245,7 @@ class BookInfoViewModel(application: Application) : BaseViewModel(application) {
             }
         } else {
             val bookSource = bookSource ?: let {
+                SourceDiag.lookup("loadChapter", book.bookUrl, book.origin, false)
                 chapterListData.postValue(emptyList())
                 context.toastOnUi(R.string.error_no_source)
                 return

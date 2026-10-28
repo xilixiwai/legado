@@ -20,6 +20,7 @@ import io.legado.app.help.http.newCallResponseBody
 import io.legado.app.help.http.okHttpClient
 import io.legado.app.help.source.SourceHelp
 import io.legado.app.utils.GSON
+import io.legado.app.utils.SourceDiag
 import io.legado.app.utils.fromJsonArray
 import io.legado.app.utils.fromJsonObject
 import io.legado.app.utils.inputStream
@@ -123,6 +124,17 @@ class ImportBookSourceViewModel(app: Application) : BaseViewModel(app) {
             }
             SourceHelp.insertBookSource(*selectSource.toTypedArray())
             ContentProcessor.upReplaceRules()
+            // [诊断] 一条汇总代替逐条明细；failed 无法从现有调用链可靠获取，输出 na
+            val appliedNew = selectStatus.indices.count { selectStatus[it] && newSourceStatus[it] }
+            val appliedUpdate =
+                selectStatus.indices.count { selectStatus[it] && updateSourceStatus[it] }
+            SourceDiag.importSummary(
+                total = allSources.size,
+                applied = selectSource.size,
+                newCount = appliedNew,
+                updateCount = appliedUpdate,
+                skipCount = selectSource.size - appliedNew - appliedUpdate
+            )
         }.onFinally {
             finally.invoke()
         }
@@ -179,6 +191,7 @@ class ImportBookSourceViewModel(app: Application) : BaseViewModel(app) {
                 else -> throw NoStackTraceException(context.getString(R.string.wrong_format))
             }
         }.onError {
+            SourceDiag.importFail(it, text)
             errorLiveData.postValue("ImportError:${it.localizedMessage}")
             AppLog.put("ImportError:${it.localizedMessage}", it)
         }.onSuccess {
