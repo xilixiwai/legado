@@ -177,9 +177,9 @@ class ChangeBookSourceAdapter(
         }
         holder.itemView.setOnClickListener {
             getItem(holder.layoutPosition)?.let {
-                // [诊断] 只记录点击判定结果，条件本身保持原样
+                // [诊断] 只记录点击判定结果
                 SourceDiag.click(it.bookUrl, callBack.oldBookUrl, it.origin, callBack.oldBookOrigin)
-                if (it.bookUrl != callBack.oldBookUrl) {
+                if (!isDuplicateSelection(it.bookUrl, it.origin, callBack.oldBookUrl, callBack.oldBookOrigin)) {
                     callBack.changeTo(it)
                 }
             }
@@ -228,7 +228,7 @@ class ChangeBookSourceAdapter(
     interface CallBack {
         val oldBookUrl: String?
 
-        /** 仅用于诊断：当前书籍的 origin，用来区分「地址相同但书源不同」 */
+        /** 当前书籍的书源归属，用于区分「地址相同但书源不同」 */
         val oldBookOrigin: String?
         fun changeTo(searchBook: SearchBook)
         fun topSource(searchBook: SearchBook)
@@ -240,3 +240,23 @@ class ChangeBookSourceAdapter(
         fun getBookScore(searchBook: SearchBook): Int
     }
 }
+
+/**
+ * 换源列表点击的「重复选择」判定。
+ *
+ * 只有候选书籍的地址**和**书源归属都与当前书籍相同，才算重复选择并跳过；
+ * 任一项不同都允许进入原有换源流程。
+ *
+ * 为什么不能只看 URL：`books.bookUrl` 与 `books.origin` 是两个独立字段，
+ * 「批量替换域名」只改 `bookUrl` / `tocUrl`，明确不动 `origin`。换域名后旧书的
+ * `bookUrl` 已经是新域名，新书源返回的候选地址与它完全相同，此时只看 URL 会把
+ * 「同一本书、不同书源」误判为重复点击，点击后毫无反应。
+ *
+ * 独立成顶层函数是为了能在 JVM 单元测试里直接验证判定结果，不依赖 RecyclerView。
+ */
+internal fun isDuplicateSelection(
+    candidateBookUrl: String?,
+    candidateOrigin: String?,
+    oldBookUrl: String?,
+    oldBookOrigin: String?
+): Boolean = candidateBookUrl == oldBookUrl && candidateOrigin == oldBookOrigin

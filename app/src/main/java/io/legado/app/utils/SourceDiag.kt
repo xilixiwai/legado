@@ -301,10 +301,12 @@ object SourceDiag {
     /**
      * 换源列表点击。
      *
-     * `gate=skip` 表示点击被 `if (it.bookUrl != oldBookUrl)` 拦下。
+     * `gate=skip` 表示点击被 `isDuplicateSelection()` 判为重复选择而拦下
+     * （候选地址与书源归属都跟当前书籍相同）。
      * 关键区分：
-     * - `sameUrl=true  sameOrigin=true`  → 正常地又点了当前源；
-     * - `sameUrl=true  sameOrigin=false` → 地址相同但书源不同，属于异常形态。
+     * - `sameUrl=true  sameOrigin=true`  → 正常地又点了当前源，跳过；
+     * - `sameUrl=true  sameOrigin=false` → 地址相同但书源不同，应当放行；
+     *   若仍出现 `gate=skip`，说明门禁没有按预期生效。
      */
     fun click(bookUrl: String?, oldBookUrl: String?, origin: String?, oldOrigin: String?) {
         val sameUrl = bookUrl == oldBookUrl

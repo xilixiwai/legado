@@ -9,7 +9,7 @@ import org.junit.Test
  * [诊断] 插入点回归测试：证明「只加日志，没有改业务」。
  *
  * 覆盖审批要求里必须固化的几条：
- * - `if (it.bookUrl != callBack.oldBookUrl)` 及其调用行为原样保留；
+ * - 换源点击门禁同时比较地址与书源归属（行为由 ChangeSourceGateTest 覆盖）；
  * - 七步迁移的调用顺序与步骤编号未变，且「开始 / 失败 / 提交成功」三态可区分；
  * - 换域名前的新 URL 占用检查未变；
  * - 原有四条 logcat 日志没有被替换；
@@ -38,21 +38,27 @@ class SourceDiagInsertionTest {
     private val cacheBookPath = "app/src/main/java/io/legado/app/model/CacheBook.kt"
 
     @Test
-    fun `换源点击判定条件与调用保持原样`() {
+    fun `换源点击门禁同时比较地址与书源归属`() {
         val src = DiagSourceText.source(adapterPath)
         val block = DiagSourceText.block(
             src,
             "holder.itemView.setOnClickListener {",
             "holder.itemView.onLongClick {"
         )
+        // 门禁必须把 bookUrl 与 origin 一起比较，否则「地址相同、书源不同」会被误判为重复
         assertEquals(
             1,
-            DiagSourceText.countOf(block, "if (it.bookUrl != callBack.oldBookUrl) {")
+            DiagSourceText.countOf(
+                block,
+                "isDuplicateSelection(it.bookUrl, it.origin, callBack.oldBookUrl, callBack.oldBookOrigin)"
+            )
         )
+        // 旧的单字段比较已经移除
+        assertFalse(block, block.contains("if (it.bookUrl != callBack.oldBookUrl) {"))
         DiagSourceText.assertOrder(
             block,
             "SourceDiag.click(",
-            "if (it.bookUrl != callBack.oldBookUrl) {",
+            "isDuplicateSelection(",
             "callBack.changeTo(it)"
         )
     }
