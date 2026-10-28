@@ -160,6 +160,27 @@ object BookCover {
             }
     }
 
+    /**
+     * 加载已落盘的漫画图片（整本下载或缓存过的）。
+     *
+     * 与 [loadManga] 的区别：不写 Glide 磁盘缓存、不走网络。
+     * 文件内容是 [io.legado.app.help.book.BookHelp.saveImage] 写入的**已解码**数据，
+     * 所以这里不能再套一次 imageDecode。
+     */
+    fun loadMangaLocal(
+        context: Context,
+        file: File,
+        transformation: Transformation<Bitmap>? = null,
+    ): RequestBuilder<Drawable> {
+        var builder = Glide.with(context).load(file)
+            .diskCacheStrategy(DiskCacheStrategy.NONE)
+            .skipMemoryCache(true)
+        if (transformation != null) {
+            builder = builder.transform(transformation)
+        }
+        return builder
+    }
+
     fun preloadManga(
         context: Context,
         path: String?,

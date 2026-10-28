@@ -26,6 +26,11 @@
     </group>
 
     <item
+        android:id="@+id/menu_download_all"
+        android:title="@string/menu_download_all_manga"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/menu_pre_manga_number"
         android:title="@string/pre_download"
         app:showAsAction="never" />

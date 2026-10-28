@@ -32,10 +32,12 @@ import io.legado.app.data.entities.BookSource
 import io.legado.app.databinding.ActivityMangaBinding
 import io.legado.app.databinding.ViewLoadMoreBinding
 import io.legado.app.help.book.isImage
+import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.removeType
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.storage.Backup
 import io.legado.app.lib.dialogs.alert
+import io.legado.app.model.MangaCache
 import io.legado.app.model.ReadManga
 import io.legado.app.receiver.NetworkChangedListener
 import io.legado.app.ui.book.changesource.ChangeBookSourceDialog
@@ -489,6 +491,8 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
                 }
             }
 
+            R.id.menu_download_all -> downloadWholeManga()
+
             R.id.menu_pre_manga_number -> {
                 showNumberPickerDialog(
                     0,
@@ -685,6 +689,38 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
         } else {
             mPagerSnapHelper.attachToRecyclerView(null)
             mLayoutManager.orientation = LinearLayoutManager.VERTICAL
+        }
+    }
+
+    /**
+     * 下载整本漫画：第一章到最后一章的全部图片。
+     *
+     * 只负责确认与发起，真正的执行在 [io.legado.app.service.MangaCacheService]。
+     * 同一时间只允许一个整本下载任务，避免通知无法表达各自进度。
+     */
+    private fun downloadWholeManga() {
+        val book = ReadManga.book ?: return
+        if (book.isLocal) {
+            toastOnUi(R.string.manga_download_local_unsupported)
+            return
+        }
+        if (MangaCache.isRun) {
+            toastOnUi(R.string.manga_download_running)
+            return
+        }
+        val chapterCount = ReadManga.chapterSize
+        if (chapterCount <= 0) {
+            toastOnUi(R.string.error_load_toc)
+            return
+        }
+        alert(
+            getString(R.string.offline_cache),
+            getString(R.string.manga_download_all_tip, book.name, chapterCount)
+        ) {
+            noButton()
+            yesButton {
+                MangaCache.start(this@ReadMangaActivity, book, 0, chapterCount - 1)
+            }
         }
     }
 

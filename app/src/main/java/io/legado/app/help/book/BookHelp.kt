@@ -29,6 +29,7 @@ import io.legado.app.utils.getFile
 import io.legado.app.utils.isContentScheme
 import io.legado.app.utils.onEachParallel
 import io.legado.app.utils.postEvent
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
@@ -58,6 +59,9 @@ object BookHelp {
     private const val cacheFolderName = "book_cache"
     private const val cacheImageFolderName = "images"
     private const val cacheEpubFolderName = "epub"
+
+    /** 整本漫画下载完成的标记文件名，放在书目录下（不在 images/ 内，不会被图片清理遍历到） */
+    private const val mangaFullCacheMarkName = "manga_full_cache"
     private val downloadImages = ConcurrentHashMap<String, Mutex>()
 
     val cachePath = FileUtils.getPath(downloadDir, cacheFolderName)
@@ -133,6 +137,10 @@ object BookHelp {
         //只处理漫画
         //为0的时候，不清除已缓存数据
         if (!book.isImage || AppConfig.imageRetainNum == 0) {
+            return
+        }
+        //整本下载过的漫画按用户显式意图保留，不受「只保留当前章节附近图片」影响
+        if (isMangaFullCached(book)) {
             return
         }
         //向前保留设定数量，向后保留预下载数量
@@ -284,6 +292,103 @@ object BookHelp {
     @Synchronized
     fun isImageExist(book: Book, src: String): Boolean {
         return getImage(book, src).exists()
+    }
+
+    /**
+     * 图片文件存在且非空。
+     *
+     * [isImageExist] 只看存在性；下载被中断可能留下 0 字节或残缺文件。
+     * 整本漫画下载的「跳过」判定与阅读页的「本地命中」判定都以本方法为准，
+     * 避免把坏文件当成已缓存，从而既不重下也显示不出来。
+     */
+    fun isImageUsable(book: Book, src: String): Boolean {
+        val file = getImage(book, src)
+        return file.exists() && file.length() > 0
+    }
+
+    /**
+     * 与 [saveImage] 逻辑一致，但把结果显式返回给调用方。
+     *
+     * [saveImage] 会吞掉异常只写 AppLog，调用方无法统计成功/失败；整本下载需要准确的
+     * 失败计数与重试，所以单独提供本方法。**不修改 [saveImage] 的既有语义**，
+     * 小说缓存、正文插图等原有调用方行为不变。
+     *
+     * @return true 表示文件已落盘（含「本来就有」的情况）
+     */
+    suspend fun saveImageChecked(
+        bookSource: BookSource?,
+        book: Book,
+        src: String,
+        chapter: BookChapter? = null
+    ): Boolean {
+        if (isImageUsable(book, src)) {
+            return true
+        }
+        val mutex = synchronized(this) {
+            downloadImages.getOrPut(src) { Mutex() }
+        }
+        mutex.lock()
+        try {
+            if (isImageUsable(book, src)) {
+                return true
+            }
+            val analyzeUrl = AnalyzeUrl(
+                src, source = bookSource, coroutineContext = coroutineContext
+            )
+            val bytes = analyzeUrl.getByteArrayAwait()
+            //某些图片被加密，需要进一步解密
+            val decoded = runScriptWithContext {
+                ImageUtils.decode(src, bytes, isCover = false, bookSource, book)
+            } ?: return false
+            if (!checkImage(decoded)) {
+                // 与 saveImage 一致：失效图片也写盘，避免每次进正文都重新拉取
+                AppLog.put("${book.name} ${chapter?.title} 图片 $src 下载错误 数据异常")
+            }
+            writeImage(book, src, decoded)
+            return true
+        } catch (e: CancellationException) {
+            //取消不是失败，必须向上传播，否则任务停不下来
+            throw e
+        } catch (e: Exception) {
+            coroutineContext.ensureActive()
+            val msg = "${book.name} ${chapter?.title} 图片 $src 下载失败\n${e.localizedMessage}"
+            AppLog.put(msg, e)
+            return false
+        } finally {
+            //只有在没有其他协程等待时才移除，避免同一 URL 被并发重复下载
+            mutex.unlock()
+            synchronized(this) {
+                if (!mutex.isLocked) {
+                    downloadImages.remove(src)
+                }
+            }
+        }
+    }
+
+    /**
+     * 标记该书已完成「整本漫画下载」。
+     *
+     * 用缓存目录里的一个空标记文件实现，不新增数据库字段，也不影响其它模块。
+     * [clearComicCache] 见到标记就跳过，避免用户设置了「图片保留章节数」后
+     * 整本下载的图片在下次启动被批量删除。
+     */
+    fun markMangaFullCached(book: Book) {
+        runCatching {
+            FileUtils.createFileIfNotExist(
+                downloadDir,
+                cacheFolderName,
+                book.getFolderName(),
+                mangaFullCacheMarkName
+            )
+        }
+    }
+
+    fun isMangaFullCached(book: Book): Boolean {
+        return downloadDir.exists(
+            cacheFolderName,
+            book.getFolderName(),
+            mangaFullCacheMarkName
+        )
     }
 
     fun getImageSuffix(src: String): String {

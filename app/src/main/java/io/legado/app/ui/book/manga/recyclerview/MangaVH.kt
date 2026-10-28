@@ -22,10 +22,13 @@ import com.bumptech.glide.load.Transformation
 import com.bumptech.glide.load.engine.GlideException
 import com.bumptech.glide.request.RequestListener
 import com.bumptech.glide.request.target.Target
+import io.legado.app.help.book.BookHelp
+import io.legado.app.help.book.isImage
 import io.legado.app.help.glide.progress.ProgressManager
 import io.legado.app.model.BookCover
 import io.legado.app.model.ReadManga
 import io.legado.app.utils.printOnDebug
+import java.io.File
 
 open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Context) :
     RecyclerView.ViewHolder(binding.root) {
@@ -59,6 +62,21 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
         isLastImage: Boolean,
         transformation: Transformation<Bitmap>?
     ) {
+        loadImage(imageUrl, isHorizontal, isLastImage, transformation, preferLocal = true)
+    }
+
+    /**
+     * @param preferLocal 是否优先使用持久化缓存里的本地文件。
+     * 本地文件加载失败时会自动以 [preferLocal] = false 重试一次网络地址，
+     * 避免某张图缓存损坏导致整章永久打不开。
+     */
+    private fun loadImage(
+        imageUrl: String,
+        isHorizontal: Boolean,
+        isLastImage: Boolean,
+        transformation: Transformation<Bitmap>?,
+        preferLocal: Boolean,
+    ) {
         mFlProgress.isVisible = true
         mLoading.isVisible = true
         mRetry?.isGone = true
@@ -70,18 +88,36 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
         }
         try {
             mImage.tag = imageUrl
-            BookCover.loadManga(
-                context,
-                imageUrl,
-                sourceOrigin = ReadManga.book?.origin,
-                transformation = transformation
-            ).addListener(object : RequestListener<Drawable> {
+            val localFile = if (preferLocal) localImageFile(imageUrl) else null
+            if (localFile != null) {
+                //命中本地缓存：不会再有网络百分比
+                mProgress.isVisible = false
+            }
+            val request = if (localFile != null) {
+                BookCover.loadMangaLocal(context, localFile, transformation)
+            } else {
+                BookCover.loadManga(
+                    context,
+                    imageUrl,
+                    sourceOrigin = ReadManga.book?.origin,
+                    transformation = transformation
+                )
+            }
+            request.addListener(object : RequestListener<Drawable> {
                 override fun onLoadFailed(
                     e: GlideException?,
                     model: Any?,
                     target: Target<Drawable>,
                     isFirstResource: Boolean,
                 ): Boolean {
+                    if (localFile != null) {
+                        //本地文件不可读/已损坏 -> 立刻回退网络
+                        loadImage(
+                            imageUrl, isHorizontal, isLastImage, transformation,
+                            preferLocal = false
+                        )
+                        return true
+                    }
                     mFlProgress.isVisible = true
                     mLoading.isGone = true
                     mRetry?.isVisible = true
@@ -137,5 +173,19 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
             e.printOnDebug()
         }
 
+    }
+
+    /**
+     * 持久化缓存命中判定。
+     *
+     * 键与 [BookHelp.saveImage] 写入时完全一致（图片绝对地址的 MD5 + 后缀），
+     * 因此不会把别的章节的图片错认成本章；同时要求文件非空，
+     * 避免把下载中断留下的 0 字节文件当成命中。
+     */
+    private fun localImageFile(imageUrl: String): File? {
+        val book = ReadManga.book ?: return null
+        if (!book.isImage) return null
+        if (!BookHelp.isImageUsable(book, imageUrl)) return null
+        return BookHelp.getImage(book, imageUrl)
     }
 }

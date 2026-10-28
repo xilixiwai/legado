@@ -100,6 +100,10 @@
     <string name="web_service_desc">用浏览器写源或看书</string>
     <string name="web_edit_source">Web 编辑书源</string>
     <string name="offline_cache">离线缓存</string>
+    <string name="menu_download_all_manga">下载整本漫画</string>
+    <string name="manga_download_all_tip">《%1$s》共 %2$d 章，将逐章下载全部图片到本地</string>
+    <string name="manga_download_running">已有漫画正在下载</string>
+    <string name="manga_download_local_unsupported">本地书籍无需下载</string>
     <string name="offline_cache_t">离线缓存</string>
     <string name="offline_cache_s">缓存选择的章节到本地</string>
     <string name="change_origin">换源</string>
