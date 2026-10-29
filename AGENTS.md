@@ -16,4 +16,5 @@
 - **临时输出不进 `reports/`**:测试产物放 `build/`,真机日志放 `logs/`(可随时清空)。
 - **不新建重复的 README / 索引 / 总报告**;已有规则文件能改就改,不要再建第二套规则。
 - **报告里的测试结论必须标注口径**:写明「当时实跑」的日期与命令;未在真机验证的事项单列,不得把历史成功写成当前已验证。
-- `.workbuddy-ai/`、`.workbuddy/`、`logs/` 默认是本地工作产物,不入库;确需入库时逐文件显式 `git add`,禁止 `git add .` / `git add -A` 把它们带进提交。
+- **本地工作产物不入库**:`.gitignore` 已忽略 `/logs/`、`/.workbuddy/`、`.workbuddy-ai/reports/`、`.workbuddy-ai/memory/`。这四类无代码、构建或测试引用,缺失不影响运行;确需入库时用 `git add -f <文件>`(被忽略的文件普通 `git add` 会直接报错),禁止 `git add .` / `git add -A`。
+- **是否入库看实际作用,不看目录归属**:`.workbuddy-ai/PROJECT_STATE.md`(项目状态与设计决策)和 `.workbuddy-ai/scripts/`(可复现实验脚本)故意未被忽略,由提交者显式决定;凡影响编译、测试、构建、签名或开发规范的文件,不得因「是 Agent 生成的」而排除。
