@@ -1,6 +1,8 @@
 package io.legado.app.help.book
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.documentfile.provider.DocumentFile
 import com.script.rhino.runScriptWithContext
@@ -16,6 +18,7 @@ import io.legado.app.model.ImageBatchStats
 import io.legado.app.model.ImageCacheResult
 import io.legado.app.model.ImageFileInfo
 import io.legado.app.model.ImageStore
+import io.legado.app.model.MangaImageContent
 import io.legado.app.model.MangaImageExtractor
 import io.legado.app.model.MangaImageKeys
 import io.legado.app.model.PersistentImageCache
@@ -55,6 +58,7 @@ import kotlinx.coroutines.withContext
 import org.apache.commons.text.similarity.JaccardSimilarity
 import splitties.init.appCtx
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.FileOutputStream
@@ -98,6 +102,34 @@ object BookHelp {
 
     /** 单本漫画的日常阅读缓存上限；超出后按最久未修改优先清理（整本下载的书不受影响） */
     private const val MANGA_IMAGE_CACHE_LIMIT_BYTES = 512L * 1024 * 1024
+
+    /**
+     * 允许转码的最大像素数（约 800 万像素 ≈ 32MB ARGB_8888）。
+     *
+     * 超长条漫/超大图在低内存设备上解码就会 OOM，直接保留原始字节；
+     * 这里是**保护阈值**，不是降采样：低于阈值的图片仍按原始分辨率编码。
+     */
+    private const val MAX_TRANSCODE_PIXELS = 8_000_000L
+
+    /**
+     * 同时进行的转码数上限。
+     *
+     * 下载并发是 4，但每张图要解码成整张 Bitmap，4 张 8MP 同时解码 ≈ 128MB，
+     * 低端机会被 LMK 干掉。限制为 2，峰值约 64MB，代价只是编码排队而不是重新下载。
+     */
+    private val optimizePermits = Semaphore(2)
+
+    /**
+     * WebP 有损编码质量。
+     *
+     * 参数不是拍脑袋定的：用 Pillow/libwebp 对仓库内可用样本实测（见交付报告），
+     * q95 对已经是 JPEG 的图**普遍更大**（+64%~+90%），q90 才开始有可比性，
+     * 而 q90 对线稿页 PSNR 仍有 ~56dB。取 90 是「能省则省、省不了就留原图」的折中。
+     */
+    private const val WEBP_LOSSY_QUALITY = 90
+
+    /** 小于该体积的图片压缩收益极低，跳过解码以省一次峰值内存 */
+    private const val MIN_TRANSCODE_BYTES = 16 * 1024
 
     val cachePath = FileUtils.getPath(downloadDir, cacheFolderName)
 
@@ -182,7 +214,8 @@ object BookHelp {
             cacheImageFolderName
         )
         imagesDir.listFiles()?.forEach { imgFile ->
-            if (imgFile.length() <= 0) imgFile.delete()
+            //.tmp 是正在写入的临时文件，长度可能瞬间为 0，不能当坏文件清掉
+            if (!imgFile.isTransientCacheFile() && imgFile.length() <= 0) imgFile.delete()
         }
         //为0的时候，不清除已缓存数据
         if (fullCached) {
@@ -199,12 +232,18 @@ object BookHelp {
                 val content = getContent(book, it)
                 if (content != null) {
                     extractMangaImageUrls(it, content).forEach { mSrc ->
-                        imgNames.add(MangaImageKeys.imageFileName(mSrc))
+                        //新旧命名都要留在保留集里，否则升级后第一次清理就会把旧缓存全删掉
+                        imgNames.addAll(
+                            MangaImageContent.candidatesFor(
+                                MangaImageKeys.baseName(mSrc),
+                                getImageSuffix(mSrc)
+                            )
+                        )
                     }
                 }
             }
             imagesDir.listFiles()?.forEach { imgFile ->
-                if (!imgNames.contains(imgFile.name)) {
+                if (!imgFile.isTransientCacheFile() && !imgNames.contains(imgFile.name)) {
                     imgFile.delete()
                 }
             }
@@ -213,6 +252,9 @@ object BookHelp {
         trimImageCacheSize(imagesDir)
     }
 
+    /** 正在写入的临时文件（`.tmp`），任何清理都不能碰，否则会打断进行中的落盘 */
+    private fun File.isTransientCacheFile(): Boolean = name.endsWith(".tmp")
+
     /**
      * 单本漫画图片目录的容量兜底。
      *
@@ -220,7 +262,7 @@ object BookHelp {
      * 避免日常阅读无限占盘，又不动用户显式下载的内容。
      */
     private fun trimImageCacheSize(imagesDir: File) {
-        val files = imagesDir.listFiles()?.filter { it.isFile } ?: return
+        val files = imagesDir.listFiles()?.filter { it.isFile && !it.isTransientCacheFile() } ?: return
         if (files.isEmpty()) return
         val victims = planImageCacheTrim(
             files.map { ImageFileInfo(it.name, it.length(), it.lastModified()) },
@@ -372,13 +414,30 @@ object BookHelp {
         }
     }
 
-    fun getImage(book: Book, src: String): File {
+    private fun imageDir(book: Book): File {
         return downloadDir.getFile(
             cacheFolderName,
             book.getFolderName(),
-            cacheImageFolderName,
-            MangaImageKeys.imageFileName(src)
+            cacheImageFolderName
         )
+    }
+
+    /**
+     * 图片缓存文件。
+     *
+     * 返回**实际存在**的那个文件：先找新后缀 `.mcache`/`.svg`，再找旧版 URL 后缀，
+     * 都没有时返回旧命名路径（`ImageProvider` 等小说侧调用方原有行为不变）。
+     * 新旧命名共用同一个 MD5 前缀，所以同一张图不会因为换后缀变成两份缓存。
+     */
+    fun getImage(book: Book, src: String): File {
+        val dir = imageDir(book)
+        val base = MangaImageKeys.baseName(src)
+        val existing = MangaImageContent.resolveExistingCacheName(
+            baseName = base,
+            urlSuffix = getImageSuffix(src),
+            exists = { name -> File(dir, name).exists() }
+        )
+        return File(dir, existing ?: MangaImageKeys.legacyImageFileName(src))
     }
 
     @Synchronized
@@ -396,6 +455,7 @@ object BookHelp {
      *
      * 只看 `exists()` 会把「403 页面」「验证页 HTML」「0 字节半截文件」当成已缓存，
      * 于是既不重下也显示不出来。命中判定、跳过判定、清理判定统一以本方法为准。
+     * 判定依据是**文件内容**（`BitmapFactory` 按 magic bytes 识别），与扩展名无关。
      */
     fun isImageUsable(book: Book, src: String): Boolean = isImageFileValid(getImage(book, src))
 
@@ -417,20 +477,35 @@ object BookHelp {
     /**
      * 原子写：先写 `.tmp` 再改名，避免中断留下半截文件被当成命中。
      * 写完回读长度，确认落盘完整。
+     *
+     * 后缀按**内容**决定（`MangaImageContent.suffixFor`）：
+     * - 漫画：已知位图统一 `.<mcache>`，SVG 保持 `.svg`；
+     * - 小说/正文插图：沿用 URL 后缀，行为与升级前完全一致。
+     *
+     * 新文件校验通过后才删除同一 MD5 前缀的旧后缀文件（迁移），
+     * 中途失败不会动旧文件，避免「新的没写成功、旧的已经没了」。
      */
     @Synchronized
     private fun writeImageAtomic(book: Book, src: String, bytes: ByteArray): Boolean {
         if (bytes.isEmpty()) return false
-        val target = getImage(book, src)
-        val dir = target.parentFile ?: return false
+        val dir = imageDir(book)
         if (!dir.exists() && !dir.mkdirs()) return false
+        ensureNoMedia(dir)
+        val suffix = if (book.isImage) {
+            MangaImageContent.suffixFor(bytes, getImageSuffix(src))
+        } else {
+            getImageSuffix(src)
+        }
+        val target = File(dir, MangaImageKeys.imageFileName(src, suffix))
         val tmp = File(dir, "${target.name}.tmp")
-        return try {
+        val written = try {
             tmp.writeBytes(bytes)
-            if (target.exists() && !target.delete()) {
-                return false
+            //同目录 rename 在 Android/Linux 上是原子覆盖：先试这一步，旧文件在成功前不动
+            var renamed = tmp.renameTo(target)
+            if (!renamed && target.exists()) {
+                //个别文件系统不支持覆盖式 rename，退回到「删旧 + 改名」，此时才可能丢旧文件
+                if (target.delete()) renamed = tmp.renameTo(target)
             }
-            val renamed = tmp.renameTo(target)
             renamed && target.exists() && target.length() == bytes.size.toLong()
         } catch (e: Exception) {
             AppLog.put("${book.name} 图片 $src 写入缓存失败\n${e.localizedMessage}", e)
@@ -438,6 +513,143 @@ object BookHelp {
         } finally {
             if (tmp.exists()) tmp.delete()
         }
+        if (written) {
+            //新文件已校验落盘，清掉同一张图的旧后缀副本，避免一份图两份空间
+            deleteStaleVariants(dir, src, keepName = target.name)
+        }
+        return written
+    }
+
+    /** 同一 MD5 前缀下、除保留文件外的旧后缀副本 */
+    private fun deleteStaleVariants(dir: File, src: String, keepName: String) {
+        MangaImageContent.candidatesFor(
+            MangaImageKeys.baseName(src),
+            getImageSuffix(src)
+        ).forEach { name ->
+            if (name == keepName) return@forEach
+            val stale = File(dir, name)
+            if (stale.exists() && !stale.delete()) {
+                AppLog.put("旧缓存文件 ${stale.name} 未能删除")
+            }
+        }
+    }
+
+    /**
+     * 在**书目录**（`images/` 的上一层）放 `.nomedia`，让媒体扫描跳过这本书的图片目录。
+     *
+     * 不能放在 `book_cache/` 根目录：`clearInvalidCache` 会把根目录下「不是书目录名」的条目
+     * 当作残留删掉，`.nomedia` 每次启动都会被清掉。放在书目录内既不会被清理，
+     * 又覆盖其下的 `images/`。
+     *
+     * 注意：这只是减少被相册/媒体库扫描到的概率，**不是加密**，
+     * 专业工具仍能读出内容；缓存目录本身也已在 App 专属外部目录内。
+     */
+    private fun ensureNoMedia(imagesDir: File) {
+        val bookCacheDir = imagesDir.parentFile ?: return
+        val marker = File(bookCacheDir, ".nomedia")
+        if (!marker.exists()) {
+            runCatching { marker.createNewFile() }
+        }
+    }
+
+    /**
+     * 落盘前的图片压缩：PNG 走无损 WebP，JPEG 走高质量有损 WebP，
+     * 只有「更小且尺寸不变」才采用。
+     *
+     * 哪些图**不转码**（任一命中就保留原图，绝不为了统一格式破坏图片）：
+     * - SVG：没有位图编码器；WebP/已经符合目标格式：不重复转码；
+     * - GIF：可能是动图，转码会丢帧；BMP 等罕见格式不做猜测；
+     * - 带 EXIF/ICC 元数据：转码会丢方向与色彩配置；
+     * - PNG 且系统 < API 30：拿不到无损 WebP，转有损会把文字糊掉；
+     * - 像素数超过 [MAX_TRANSCODE_PIXELS]：低内存设备解码就 OOM；
+     * - 体积过小、解码失败、编码失败、内存不足。
+     *
+     * 不做降采样：`inSampleSize` 从不设置，分辨率保持不变。
+     */
+    private fun optimizeImageBytes(bytes: ByteArray): ByteArray {
+        if (bytes.size < MIN_TRANSCODE_BYTES) return bytes
+        if (MangaImageContent.isSvg(bytes)) return bytes
+        if (MangaImageContent.isWebp(bytes)) return bytes
+        if (MangaImageContent.isGif(bytes)) return bytes
+        val isPng = MangaImageContent.isPng(bytes)
+        val isJpeg = MangaImageContent.isJpeg(bytes)
+        if (!isPng && !isJpeg) return bytes
+        if (MangaImageContent.hasMetadataSegments(bytes)) return bytes
+        //PNG 无损 WebP 需要 API 30；老系统上转有损会明显糊字，干脆不转
+        if (isPng && Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return bytes
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds) }
+        val width = bounds.outWidth
+        val height = bounds.outHeight
+        if (width < 1 || height < 1) return bytes
+        if (width.toLong() * height > MAX_TRANSCODE_PIXELS) return bytes
+        var bitmap: Bitmap? = null
+        return try {
+            bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                ?: return bytes
+            //PNG 先试无损（线稿/文字零损失），只有在无损没变小的时候才退到有损
+            val attempts = ArrayList<Pair<Bitmap.CompressFormat, Int>>(2)
+            if (isPng) attempts.add(Bitmap.CompressFormat.WEBP_LOSSLESS to 100)
+            attempts.add(lossyWebpFormat() to WEBP_LOSSY_QUALITY)
+            var best = bytes
+            for ((format, quality) in attempts) {
+                val candidate = encodeWebp(bitmap, format, quality) ?: continue
+                if (!hasSameDimensions(candidate, width, height)) {
+                    //编码后尺寸变了说明这条路径不可信，跳过该次结果
+                    continue
+                }
+                if (candidate.size < best.size) {
+                    //「不放大」的唯一判据在纯函数里，这里只负责挑第一次变小的结果
+                    val merged = MangaImageContent.selectSmallerOrOriginal(best, candidate)
+                    if (merged !== best) {
+                        best = merged
+                        //已经拿到更小的结果就停：无损优先，避免为几 KB 再压一次
+                        break
+                    }
+                }
+            }
+            best
+        } catch (e: OutOfMemoryError) {
+            AppLog.put("漫画图片压缩内存不足，保留原图")
+            bytes
+        } catch (e: Exception) {
+            AppLog.put("漫画图片压缩失败，保留原图\n${e.localizedMessage}")
+            bytes
+        } finally {
+            bitmap?.recycle()
+        }
+    }
+
+    /** 编码成 WebP；失败返回 null（调用方按原图处理） */
+    private fun encodeWebp(
+        bitmap: Bitmap,
+        format: Bitmap.CompressFormat,
+        quality: Int,
+    ): ByteArray? {
+        val out = ByteArrayOutputStream(bitmap.byteCount / 4)
+        if (!bitmap.compress(format, quality, out)) return null
+        return out.toByteArray()
+    }
+
+    /**
+     * 有损 WebP 的格式常量。
+     *
+     * `WEBP_LOSSY` 是 API 30 才有的枚举值，老系统上引用会在运行期抛 `NoSuchFieldError`，
+     * 所以必须按系统版本分流，不能直接写死。
+     */
+    @Suppress("DEPRECATION")
+    private fun lossyWebpFormat(): Bitmap.CompressFormat =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Bitmap.CompressFormat.WEBP_LOSSY
+        } else {
+            Bitmap.CompressFormat.WEBP
+        }
+
+    /** 编码后必须仍是同一分辨率 */
+    private fun hasSameDimensions(bytes: ByteArray, width: Int, height: Int): Boolean {
+        val op = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size, op) }
+        return op.outWidth == width && op.outHeight == height
     }
 
     /**
@@ -556,6 +768,13 @@ object BookHelp {
         },
         onFetchFailed = { src, e ->
             AppLog.put("${book.name} ${chapter?.title} 图片 $src 下载失败\n${e.localizedMessage}", e)
+        },
+        onOptimizeFailed = { src, e ->
+            AppLog.put("${book.name} ${chapter?.title} 图片 $src 压缩失败，保留原图\n${e.localizedMessage}")
+        },
+        //压缩只在成功下载后执行；命中本地缓存时根本不会走到这里
+        optimize = { bytes ->
+            withContext(IO) { optimizePermits.withPermit { optimizeImageBytes(bytes) } }
         },
     )
 

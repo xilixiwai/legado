@@ -248,8 +248,12 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
     }
 
     /**
-     * 命中判定与统一入口同一套规则（存在 + 非空 + 可解码），
+     * 命中判定与统一入口同一套规则（存在 + 非空 + **按内容可解码**），
      * 避免「文件在但打不开」被当成命中。
+     *
+     * 缓存文件用的是非图片后缀 `.mcache`，所以这里绝不能按扩展名推断格式：
+     * 解码一律交给 `BitmapFactory`（魔数识别），上屏交给 Glide 的 `load(File)`，
+     * 它同样走 `Downsampler`/`BitmapFactory`，不看文件名。
      */
     private fun localImageFile(imageUrl: String): File? {
         val book = ReadManga.book ?: return null

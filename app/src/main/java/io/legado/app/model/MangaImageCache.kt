@@ -79,6 +79,14 @@ class PersistentImageCache(
     private val locks: ConcurrentHashMap<String, Mutex> = ConcurrentHashMap(),
     private val onInvalidData: (String) -> Unit = {},
     private val onFetchFailed: (String, Throwable) -> Unit = { _, _ -> },
+    private val onOptimizeFailed: (String, Throwable) -> Unit = { _, _ -> },
+    /**
+     * 落盘前的可选优化（压缩/转码）。
+     *
+     * 实现必须自己保证「结果不更大、尺寸不变」，失败时返回原始字节；
+     * 这里只负责兜住异常，避免优化环节把一次成功的下载变成失败。
+     */
+    private val optimize: suspend (ByteArray) -> ByteArray = { it },
 ) {
 
     suspend fun ensure(key: String): ImageCacheResult {
@@ -124,13 +132,34 @@ class PersistentImageCache(
             onInvalidData(key)
             return ImageCacheResult.FAILED
         }
-        if (!store.writeAtomic(key, bytes)) return ImageCacheResult.FAILED
+        //压缩只影响落盘体积，失败/变大都回退到原始字节，不改变「已成功下载」的事实
+        val payload = optimizeOrOriginal(key, bytes)
+        if (!store.writeAtomic(key, payload)) return ImageCacheResult.FAILED
         //写后回读：落盘的文件必须本身可用，才算缓存成功
         if (!store.isUsable(key)) {
             store.delete(key)
             return ImageCacheResult.FAILED
         }
         return ImageCacheResult.STORED
+    }
+
+    /**
+     * 执行落盘前优化。
+     *
+     * - 优化过程被取消 → 必须向上传播（否则整本下载停不下来）；
+     * - 优化抛错/返回空 → 记录后回退原始字节，下载结果不受影响；
+     * - 优化把内容改大 → 由实现（[MangaImageContent.selectSmallerOrOriginal]）回退，这里不重复判断。
+     */
+    private suspend fun optimizeOrOriginal(key: String, bytes: ByteArray): ByteArray {
+        return try {
+            val optimized = optimize(bytes)
+            if (optimized.isEmpty()) bytes else optimized
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            onOptimizeFailed(key, e)
+            bytes
+        }
     }
 
     /** 锁表只增不减会随图库规模膨胀，超过阈值清理一批无人持有的条目 */
@@ -234,6 +263,178 @@ fun planImageCacheTrim(files: List<ImageFileInfo>, limitBytes: Long): List<Strin
     return victims
 }
 
+/** 统一的非图片后缀：内容仍是 JPEG/PNG/WebP，仅扩展名不参与图片格式判断 */
+const val MANGA_CACHE_SUFFIX = "mcache"
+
+/**
+ * 按**内容**判断缓存文件形态的纯函数集合。
+ *
+ * 这些函数只做字节级判断，不依赖 Android 解码器，因此可以直接在 JVM 上测试；
+ * 下载侧（决定写什么名字）、读取侧（找哪个文件）、清理侧（保留哪些名字）共用同一套规则，
+ * 避免出现「写 `.mcache`、读 `.jpg`」这类对不上的情况。
+ */
+object MangaImageContent {
+
+    private val PNG_HEADER = byteArrayOf(
+        0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A
+    )
+    private val JPEG_HEADER = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte())
+    private val RIFF_HEADER = "RIFF".toByteArray(Charsets.US_ASCII)
+    private val WEBP_HEADER = "WEBP".toByteArray(Charsets.US_ASCII)
+    private val GIF87 = "GIF87a".toByteArray(Charsets.US_ASCII)
+    private val GIF89 = "GIF89a".toByteArray(Charsets.US_ASCII)
+
+    fun isPng(bytes: ByteArray): Boolean = startsWith(bytes, PNG_HEADER)
+
+    fun isJpeg(bytes: ByteArray): Boolean = startsWith(bytes, JPEG_HEADER)
+
+    fun isWebp(bytes: ByteArray): Boolean {
+        if (bytes.size < 12) return false
+        if (!startsWith(bytes, RIFF_HEADER)) return false
+        return regionMatches(bytes, 8, WEBP_HEADER)
+    }
+
+    fun isGif(bytes: ByteArray): Boolean =
+        startsWith(bytes, GIF87) || startsWith(bytes, GIF89)
+
+    fun isBmp(bytes: ByteArray): Boolean =
+        bytes.size >= 2 && bytes[0] == 'B'.code.toByte() && bytes[1] == 'M'.code.toByte()
+
+    /** SVG 是文本，靠前 1KB 里出现 `<svg` 判断（可能有 XML 声明/注释前缀） */
+    fun isSvg(bytes: ByteArray): Boolean {
+        val limit = minOf(bytes.size, 1024)
+        if (limit <= 0) return false
+        val head = String(bytes, 0, limit, Charsets.ISO_8859_1).lowercase()
+        return head.contains("<svg")
+    }
+
+    /** 已知位图格式（可被 BitmapFactory 按内容解码） */
+    fun isKnownBitmap(bytes: ByteArray): Boolean =
+        isPng(bytes) || isJpeg(bytes) || isWebp(bytes) || isGif(bytes) || isBmp(bytes)
+
+    /**
+     * 缓存文件应使用的后缀。
+     *
+     * - SVG 没有位图编码器，保持 `.svg`，否则真机上会解不出来；
+     * - 已知位图统一用 [MANGA_CACHE_SUFFIX]，避免相册/媒体库按扩展名把它当图片；
+     * - 无法识别的内容回退到 URL 后缀（保持旧行为，不猜格式）。
+     */
+    fun suffixFor(bytes: ByteArray, urlSuffix: String): String {
+        if (isSvg(bytes)) return "svg"
+        if (isKnownBitmap(bytes)) return MANGA_CACHE_SUFFIX
+        return urlSuffix.lowercase().ifBlank { "jpg" }
+    }
+
+    /**
+     * 是否带有可能影响**方向**或**色彩**的元数据段。
+     *
+     * JPEG 的 APP1/APP2 段承载 EXIF（旋转标记）与 ICC 色彩配置，PNG 的 iCCP/eXIf 同理。
+     * BitmapFactory 解码不会自动应用 EXIF 旋转，重新编码会丢掉 ICC，
+     * 所以这类图片一律保留原始内容，不做转码 —— 宁可多占空间，也不让漫画页躺倒或偏色。
+     */
+    fun hasMetadataSegments(bytes: ByteArray): Boolean {
+        if (isPng(bytes)) {
+            return indexOfAscii(bytes, "iCCP") >= 0 || indexOfAscii(bytes, "eXIf") >= 0
+        }
+        if (!isJpeg(bytes)) return false
+        var index = 2
+        while (index + 3 < bytes.size) {
+            if (bytes[index] != 0xFF.toByte()) {
+                index++
+                continue
+            }
+            val marker = bytes[index + 1].toInt() and 0xFF
+            //0xFF 是填充字节，只前进一个，避免把下一个真正的标记当成数据跳过
+            if (marker == 0xFF) {
+                index++
+                continue
+            }
+            //无长度的标记（RSTn/SOI/EOI/TEM）
+            if (marker == 0x01 || marker in 0xD0..0xD9) {
+                index += 2
+                continue
+            }
+            //SOS：之后是压缩数据，元数据段已经结束
+            if (marker == 0xDA) return false
+            val length = ((bytes[index + 2].toInt() and 0xFF) shl 8) or
+                    (bytes[index + 3].toInt() and 0xFF)
+            if (length < 2) return false
+            //APP1 = EXIF/XMP，APP2 = ICC
+            if (marker == 0xE1 || marker == 0xE2) return true
+            index += 2 + length
+        }
+        return false
+    }
+
+    /**
+     * 只有候选结果**更小**且非空时才采用，否则保留原始字节。
+     *
+     * 这是「压缩不放大文件」的唯一判据，避免不同入口各写一套比较逻辑。
+     */
+    fun selectSmallerOrOriginal(original: ByteArray, candidate: ByteArray?): ByteArray {
+        if (candidate == null || candidate.isEmpty()) return original
+        if (candidate.size >= original.size) return original
+        return candidate
+    }
+
+    /**
+     * 找出这张图**实际存在**的缓存文件名。
+     *
+     * 顺序：新后缀 → `.svg` → 旧版 URL 后缀 → 常见旧后缀。
+     * 新旧文件共享同一个 `md5` 前缀，所以「换后缀」不会变成两份缓存；
+     * 只有旧缓存时才返回旧名，保证升级后不清缓存也能直接命中。
+     */
+    fun resolveExistingCacheName(
+        baseName: String,
+        urlSuffix: String,
+        exists: (String) -> Boolean,
+    ): String? {
+        candidatesFor(baseName, urlSuffix).forEach { name ->
+            if (exists(name)) return name
+        }
+        return null
+    }
+
+    /** 该图所有可能存在的缓存文件名（新后缀优先），供读取与清理共用 */
+    fun candidatesFor(baseName: String, urlSuffix: String): List<String> {
+        val names = LinkedHashSet<String>(8)
+        names.add("$baseName.$MANGA_CACHE_SUFFIX")
+        names.add("$baseName.svg")
+        if (urlSuffix.isNotBlank()) {
+            //旧命名直接用 URL 原始后缀（大小写原样），新命名统一小写，两种都要能命中
+            names.add("$baseName.$urlSuffix")
+            names.add("$baseName.${urlSuffix.lowercase()}")
+        }
+        listOf("jpg", "jpeg", "png", "webp", "gif", "bmp").forEach { names.add("$baseName.$it") }
+        return names.toList()
+    }
+
+    private fun startsWith(bytes: ByteArray, prefix: ByteArray): Boolean {
+        if (bytes.size < prefix.size) return false
+        return regionMatches(bytes, 0, prefix)
+    }
+
+    private fun regionMatches(bytes: ByteArray, offset: Int, target: ByteArray): Boolean {
+        if (offset < 0 || bytes.size < offset + target.size) return false
+        for (i in target.indices) {
+            if (bytes[offset + i] != target[i]) return false
+        }
+        return true
+    }
+
+    private fun indexOfAscii(bytes: ByteArray, ascii: String): Int {
+        val needle = ascii.toByteArray(Charsets.US_ASCII)
+        if (needle.isEmpty() || bytes.size < needle.size) return -1
+        outer@ for (i in 0..bytes.size - needle.size) {
+            for (j in needle.indices) {
+                if (bytes[i + j] != needle[j]) continue@outer
+            }
+            return i
+        }
+        return -1
+    }
+}
+
 /**
  * 缓存身份的**纯函数**部分，下载/读取/清理必须共用，避免三处各算一套。
  *
@@ -243,12 +444,26 @@ fun planImageCacheTrim(files: List<ImageFileInfo>, limitBytes: Long): List<Strin
  * - 章节序号在目录重排（去重、补更、换源）后会漂移，用序号做键反而会把
  *   旧图错配到新章节；
  * - 现有磁盘上的缓存全部是按该规则命名，改成序号会让所有已有缓存作废。
+ *
+ * 二期改动只换**后缀**，`md5` 前缀不变：新旧缓存共享同一身份，不会被当成两份。
  */
 object MangaImageKeys {
 
-    /** 图片文件名：`<md5(绝对地址)16位>.<后缀>` */
-    fun imageFileName(src: String): String {
-        return "${MD5Utils.md5Encode16(src)}.${UrlUtil.getSuffix(src, "jpg")}"
+    /** 图片绝对地址的 MD5（16 位），新旧命名共用 */
+    fun baseName(src: String): String = MD5Utils.md5Encode16(src)
+
+    /**
+     * 新写入的缓存文件名：`<md5>.<后缀>`，默认 `mcache`。
+     *
+     * 内容仍是标准 JPEG/PNG/WebP 数据，只是扩展名不再声明图片类型。
+     */
+    fun imageFileName(src: String, suffix: String = MANGA_CACHE_SUFFIX): String {
+        return "${baseName(src)}.$suffix"
+    }
+
+    /** 旧版本命名（URL 后缀），只用于兼容读取与迁移后清理 */
+    fun legacyImageFileName(src: String): String {
+        return "${baseName(src)}.${UrlUtil.getSuffix(src, "jpg")}"
     }
 
     /** 书目录名：书名前 9 字 + `md5(bookUrl)`，与既有缓存目录保持一致 */

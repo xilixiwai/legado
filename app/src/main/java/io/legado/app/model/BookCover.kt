@@ -164,8 +164,12 @@ object BookCover {
      * 加载已落盘的漫画图片（整本下载或缓存过的）。
      *
      * 与 [loadManga] 的区别：不写 Glide 磁盘缓存、不走网络。
-     * 文件内容是 [io.legado.app.help.book.BookHelp.saveImage] 写入的**已解码**数据，
-     * 所以这里不能再套一次 imageDecode。
+     * 文件内容是 `BookHelp` 写入的**已解码**图片数据（可能经过 WebP 重编码）。
+     *
+     * 缓存文件使用非图片后缀 `.mcache`，因此这里**故意用 `load(File)`**：
+     * Glide 对 `File` 模型走 `FileLoader` → `Downsampler` → `BitmapFactory`，
+     * 由文件头魔数决定格式，不依赖扩展名。换成 `load(String path)` 之类的按名分发
+     * 反而可能被扩展名误导，不要改。
      */
     fun loadMangaLocal(
         context: Context,

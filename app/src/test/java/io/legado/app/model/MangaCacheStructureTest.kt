@@ -101,14 +101,17 @@ class MangaCacheStructureTest {
     @Test
     fun `缓存键与目录名共用同一套规则`() {
         val keys = DiagSourceText.source(imageCachePath)
-        assertTrue(keys, keys.contains("fun imageFileName(src: String)"))
+        assertTrue(keys, keys.contains("fun imageFileName(src: String, suffix: String = MANGA_CACHE_SUFFIX)"))
+        assertTrue(keys, keys.contains("fun baseName(src: String)"))
         assertTrue(keys, keys.contains("MD5Utils.md5Encode16(src)"))
         //键保持「绝对地址 MD5」，不改成章节序号
         assertFalse(keys, keys.contains("chapterIndex /"))
+        //新旧命名共享同一 basename，换后缀不会变成两份缓存
+        assertTrue(keys, keys.contains("fun legacyImageFileName(src: String)"))
         val bookHelp = DiagSourceText.source(bookHelpPath)
-        assertTrue(bookHelp, bookHelp.contains("MangaImageKeys.imageFileName(src)"))
-        //清理逻辑也必须用同一套键
-        assertTrue(bookHelp, bookHelp.contains("imgNames.add(MangaImageKeys.imageFileName(mSrc))"))
+        assertTrue(bookHelp, bookHelp.contains("MangaImageKeys.imageFileName(src, suffix)"))
+        //清理逻辑必须把新旧两种命名都算进保留集
+        assertTrue(bookHelp, bookHelp.contains("MangaImageContent.candidatesFor("))
     }
 
     @Test
@@ -184,7 +187,9 @@ class MangaCacheStructureTest {
             "store.delete(key)",
             "fetch(key)",
             "isValidData(bytes)",
-            "store.writeAtomic(key, bytes)"
+            //落盘前压缩：结果不允许变大的判断在纯函数里，这里只要求先优化再写
+            "optimizeOrOriginal(key, bytes)",
+            "store.writeAtomic(key, payload)"
         )
         //错误页/空响应一律不写盘
         assertTrue(ensureBlock, ensureBlock.contains("bytes.isEmpty() || !isValidData(bytes)"))
@@ -248,6 +253,70 @@ class MangaCacheStructureTest {
         val coverSrc = DiagSourceText.source("app/src/main/java/io/legado/app/model/BookCover.kt")
         val localLoader = DiagSourceText.block(coverSrc, "fun loadMangaLocal(", "fun preloadManga(")
         assertTrue(localLoader, localLoader.contains("DiskCacheStrategy.NONE"))
+        //非图片后缀的文件必须按内容解码：Glide 的 File 模型走 BitmapFactory，不看文件名
+        assertTrue(localLoader, localLoader.contains(".load(file)"))
+        assertFalse("不能按路径字符串/扩展名分发", localLoader.contains(".load(file.absolutePath)"))
+    }
+
+    @Test
+    fun `非图片后缀缓存仍按内容读取且兼容旧缓存`() {
+        val bookHelp = DiagSourceText.source(bookHelpPath)
+        //读取：先找实际存在的文件（新后缀优先，其次旧后缀），找不到才回落到旧命名路径
+        val getImageBlock = DiagSourceText.block(
+            bookHelp, "fun getImage(book: Book, src: String): File {", "    @Synchronized"
+        )
+        assertTrue(getImageBlock, getImageBlock.contains("MangaImageContent.resolveExistingCacheName("))
+        assertTrue(getImageBlock, getImageBlock.contains("MangaImageKeys.legacyImageFileName(src)"))
+        //后缀按内容决定，不按 URL 猜；小说/正文插图继续用 URL 后缀，行为不变
+        val writeBlock = DiagSourceText.block(
+            bookHelp, "private fun writeImageAtomic(", "private fun deleteStaleVariants("
+        )
+        assertTrue(
+            writeBlock,
+            writeBlock.contains("MangaImageContent.suffixFor(bytes, getImageSuffix(src))")
+        )
+        assertTrue(writeBlock, writeBlock.contains("} else {\n            getImageSuffix(src)"))
+        assertTrue(writeBlock, writeBlock.contains("MangaImageKeys.imageFileName(src, suffix)"))
+        //新文件校验成功后才清旧副本
+        DiagSourceText.assertOrder(bookHelp, "if (written) {", "deleteStaleVariants(")
+        //缓存根目录放 .nomedia：降低被相册/媒体库扫描的概率（不是加密）
+        assertTrue(bookHelp, bookHelp.contains("\".nomedia\""))
+        //命中判定按文件内容
+        assertTrue(bookHelp, bookHelp.contains("BitmapFactory.decodeFile(file.absolutePath, op)"))
+        //导出用缓存文件的实际名字，避免 .mcache 导出后找不到资源
+        val export = DiagSourceText.source("app/src/main/java/io/legado/app/service/ExportBookService.kt")
+        assertTrue(export, export.contains("val fileName = vFile.name"))
+    }
+
+    @Test
+    fun `压缩只在更小时采用且不做降采样`() {
+        val bookHelp = DiagSourceText.source(bookHelpPath)
+        val block = DiagSourceText.block(
+            bookHelp, "private fun optimizeImageBytes(", "private fun encodeWebp("
+        )
+        assertTrue(block, block.contains("MangaImageContent.selectSmallerOrOriginal(best, candidate)"))
+        //保守回退条件
+        assertTrue(block, block.contains("MAX_TRANSCODE_PIXELS"))
+        assertTrue(block, block.contains("MangaImageContent.hasMetadataSegments(bytes)"))
+        assertTrue(block, block.contains("MangaImageContent.isWebp(bytes)"))
+        //动图不能转码（会丢帧）
+        assertTrue(block, block.contains("MangaImageContent.isGif(bytes)"))
+        //PNG 先无损；老系统没有无损 WebP 就不转
+        assertTrue(block, block.contains("Bitmap.CompressFormat.WEBP_LOSSLESS"))
+        assertTrue(block, block.contains("isPng && Build.VERSION.SDK_INT < Build.VERSION_CODES.R"))
+        assertTrue(block, block.contains("attempts.add("))
+        assertTrue(block, block.contains("hasSameDimensions(candidate, width, height)"))
+        assertTrue(block, block.contains("OutOfMemoryError"))
+        assertTrue(block, block.contains("bitmap?.recycle()"))
+        //不降采样、不缩放
+        assertFalse("不允许降采样", block.contains("inSampleSize"))
+        assertFalse("不允许缩放分辨率", block.contains("createScaledBitmap"))
+        //API 30 才有的枚举值必须按版本分流
+        assertTrue(bookHelp, bookHelp.contains("private fun lossyWebpFormat()"))
+        assertTrue(bookHelp, bookHelp.contains("Bitmap.CompressFormat.WEBP_LOSSY"))
+        //接入统一入口
+        assertTrue(bookHelp, bookHelp.contains("optimize = { bytes ->"))
+        assertTrue(bookHelp, bookHelp.contains("WEBP_LOSSY_QUALITY"))
     }
 
     @Test
@@ -301,6 +370,8 @@ class MangaCacheStructureTest {
         )
         assertTrue(src, src.contains("private fun trimImageCacheSize(imagesDir: File)"))
         assertTrue(src, src.contains("MANGA_IMAGE_CACHE_LIMIT_BYTES"))
+        //清理不能碰正在写入的 .tmp
+        assertTrue(src, src.contains("isTransientCacheFile()"))
         //纯函数裁剪计划放在统一缓存文件里，便于测试
         val keys = DiagSourceText.source(imageCachePath)
         assertTrue(keys, keys.contains("fun planImageCacheTrim("))

@@ -9,9 +9,11 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -466,5 +468,185 @@ class MangaImageCacheTest {
     fun `单张大图也能被裁剪到余量以内`() {
         val files = listOf(file("huge", 5000, 1), file("small", 10, 2))
         assertEquals(listOf("huge"), planImageCacheTrim(files, limitBytes = 1000))
+    }
+
+    @Test
+    fun `容量裁剪能识别非图片后缀文件`() {
+        val files = listOf(
+            file("aaa.mcache", 400, 1),
+            file("bbb.mcache", 400, 2),
+            file("ccc.mcache", 400, 3),
+        )
+        assertEquals(listOf("aaa.mcache"), planImageCacheTrim(files, limitBytes = 1000))
+    }
+
+    // ---------- 9. 非图片后缀 ----------
+
+    @Test
+    fun `新缓存使用非图片后缀且与旧命名共享同一 basename`() {
+        val url = "https://a.test/p/1.jpg"
+        val newName = MangaImageKeys.imageFileName(url)
+        val legacyName = MangaImageKeys.legacyImageFileName(url)
+        assertTrue(newName, newName.endsWith(".mcache"))
+        assertTrue(legacyName, legacyName.endsWith(".jpg"))
+        assertEquals(MangaImageKeys.baseName(url), newName.substringBeforeLast('.'))
+        assertEquals(MangaImageKeys.baseName(url), legacyName.substringBeforeLast('.'))
+    }
+
+    @Test
+    fun `后缀按内容决定 不按 URL 猜`() {
+        val jpeg = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte(), 0, 0x10)
+        val webp = "RIFF".toByteArray() + byteArrayOf(0, 0, 0, 0) + "WEBP".toByteArray()
+        val gif = "GIF89a".toByteArray()
+        val svg = """<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"></svg>""".toByteArray()
+        assertEquals(MANGA_CACHE_SUFFIX, MangaImageContent.suffixFor(validImage, "jpg"))
+        assertEquals(MANGA_CACHE_SUFFIX, MangaImageContent.suffixFor(jpeg, "png"))
+        assertEquals(MANGA_CACHE_SUFFIX, MangaImageContent.suffixFor(webp, "gif"))
+        assertEquals(MANGA_CACHE_SUFFIX, MangaImageContent.suffixFor(gif, "jpg"))
+        //SVG 没有位图编码器，必须保持可被对应解码器识别的后缀
+        assertEquals("svg", MangaImageContent.suffixFor(svg, "jpg"))
+        //无法识别的内容不猜格式，回退 URL 后缀
+        assertEquals("jpg", MangaImageContent.suffixFor("not an image".toByteArray(), "JPG"))
+    }
+
+    @Test
+    fun `旧后缀缓存仍能被找到 且新旧不会同时算两个缓存`() {
+        val base = MangaImageKeys.baseName("https://a.test/p/1.jpg")
+        //新后缀优先
+        assertEquals(
+            "$base.mcache",
+            MangaImageContent.resolveExistingCacheName(base, "jpg") { it == "$base.mcache" }
+        )
+        //只有旧缓存时也能命中（升级不清缓存）
+        assertEquals(
+            "$base.jpg",
+            MangaImageContent.resolveExistingCacheName(base, "jpg") { it == "$base.jpg" }
+        )
+        //两个都在时取新后缀，避免同一张图两份
+        assertEquals(
+            "$base.mcache",
+            MangaImageContent.resolveExistingCacheName(base, "jpg") {
+                it == "$base.jpg" || it == "$base.mcache"
+            }
+        )
+        assertNull(MangaImageContent.resolveExistingCacheName(base, "jpg") { false })
+    }
+
+    @Test
+    fun `带 EXIF 或 ICC 元数据的图片会被识别`() {
+        //裸 JPEG（只有 SOI/EOI）
+        assertFalse(
+            MangaImageContent.hasMetadataSegments(
+                byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xD9.toByte())
+            )
+        )
+        //SOI + APP1(EXIF) + EOI
+        val withExif = byteArrayOf(
+            0xFF.toByte(), 0xD8.toByte(),
+            0xFF.toByte(), 0xE1.toByte(), 0x00, 0x08, 0, 0, 0, 0, 0, 0,
+            0xFF.toByte(), 0xD9.toByte()
+        )
+        assertTrue(MangaImageContent.hasMetadataSegments(withExif))
+        //带填充字节（FF FF E1）的 JPEG 也要能识别出 APP1，否则会漏掉旋转信息
+        val withFill = byteArrayOf(
+            0xFF.toByte(), 0xD8.toByte(),
+            0xFF.toByte(), 0xFF.toByte(),
+            0xFF.toByte(), 0xE1.toByte(), 0x00, 0x08, 0, 0, 0, 0, 0, 0,
+            0xFF.toByte(), 0xD9.toByte()
+        )
+        assertTrue(MangaImageContent.hasMetadataSegments(withFill))
+        //PNG 里带 iCCP 色彩配置
+        assertTrue(
+            MangaImageContent.hasMetadataSegments(validImage + "iCCP".toByteArray())
+        )
+        assertFalse(MangaImageContent.hasMetadataSegments(validImage))
+    }
+
+    // ---------- 10. 落盘前压缩（优化） ----------
+
+    private fun cacheWith(
+        store: ImageStore,
+        optimize: suspend (ByteArray) -> ByteArray,
+        fetch: suspend (String) -> ByteArray?,
+    ) = PersistentImageCache(
+        store = store,
+        isValidData = ::isValidImage,
+        fetch = fetch,
+        optimize = optimize,
+    )
+
+    @Test
+    fun `只采用更小的压缩结果`() {
+        val original = ByteArray(100) { 1 }
+        val smaller = ByteArray(50) { 2 }
+        val bigger = ByteArray(200) { 3 }
+        assertArrayEquals(smaller, MangaImageContent.selectSmallerOrOriginal(original, smaller))
+        assertArrayEquals(original, MangaImageContent.selectSmallerOrOriginal(original, bigger))
+        assertArrayEquals(original, MangaImageContent.selectSmallerOrOriginal(original, null))
+        assertArrayEquals(
+            original,
+            MangaImageContent.selectSmallerOrOriginal(original, ByteArray(0))
+        )
+    }
+
+    @Test
+    fun `压缩结果被写入缓存`() {
+        runBlocking {
+            val store = FakeStore()
+            val optimized = validImage.copyOf(10)
+            val c = cacheWith(store, { optimized }, { validImage })
+            assertEquals(ImageCacheResult.STORED, c.ensure("k"))
+            assertArrayEquals(optimized, store.files["k"])
+        }
+    }
+
+    @Test
+    fun `命中本地缓存时不会重复转码`() {
+        runBlocking {
+            val store = FakeStore()
+            val optimizeCalls = AtomicInteger(0)
+            val c = cacheWith(store, { bytes ->
+                optimizeCalls.incrementAndGet()
+                bytes
+            }, { validImage })
+            assertEquals(ImageCacheResult.STORED, c.ensure("k"))
+            assertEquals(ImageCacheResult.HIT, c.ensure("k"))
+            assertEquals("命中后不应再跑一次编码", 1, optimizeCalls.get())
+        }
+    }
+
+    @Test
+    fun `压缩失败时保留原始内容且仍算成功`() {
+        runBlocking {
+            val store = FakeStore()
+            val c = cacheWith(store, { throw IllegalStateException("编码器挂了") }, { validImage })
+            assertEquals(ImageCacheResult.STORED, c.ensure("k"))
+            assertArrayEquals(validImage, store.files["k"])
+        }
+    }
+
+    @Test
+    fun `压缩返回空时保留原始内容`() {
+        runBlocking {
+            val store = FakeStore()
+            val c = cacheWith(store, { ByteArray(0) }, { validImage })
+            assertEquals(ImageCacheResult.STORED, c.ensure("k"))
+            assertArrayEquals(validImage, store.files["k"])
+        }
+    }
+
+    @Test
+    fun `压缩过程被取消时向上传播且不落盘`() {
+        runBlocking {
+            val store = FakeStore()
+            val c = cacheWith(store, { throw CancellationException("取消") }, { validImage })
+            try {
+                c.ensure("k")
+                fail("取消必须向上传播")
+            } catch (e: CancellationException) {
+                //预期
+            }
+            assertFalse("取消时不能留下文件", store.files.containsKey("k"))
+        }
     }
 }

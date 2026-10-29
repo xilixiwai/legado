@@ -603,11 +603,11 @@ class ExportBookService : BaseService() {
             while (matcher.find()) {
                 matcher.group(1)?.let {
                     val src = NetworkUtils.getAbsoluteURL(chapter.url, it)
-                    val originalHref =
-                        "${MD5Utils.md5Encode16(src)}.${BookHelp.getImageSuffix(src)}"
-                    val href =
-                        "Images/${MD5Utils.md5Encode16(src)}.${BookHelp.getImageSuffix(src)}"
                     val vFile = BookHelp.getImage(book, src)
+                    //用缓存文件的实际文件名，避免漫画缓存换成 .mcache 后导出时找不到资源
+                    val fileName = vFile.name
+                    val originalHref = fileName
+                    val href = "Images/$fileName"
                     val fp = FileResourceProvider(vFile.parent)
                     if (vFile.exists()) {
                         val img = LazyResource(fp, href, originalHref)
