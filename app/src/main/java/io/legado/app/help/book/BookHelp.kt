@@ -12,17 +12,25 @@ import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.BookSource
 import io.legado.app.help.config.AppConfig
+import io.legado.app.model.ImageBatchStats
+import io.legado.app.model.ImageCacheResult
+import io.legado.app.model.ImageFileInfo
+import io.legado.app.model.ImageStore
+import io.legado.app.model.MangaImageExtractor
+import io.legado.app.model.MangaImageKeys
+import io.legado.app.model.PersistentImageCache
 import io.legado.app.model.analyzeRule.AnalyzeUrl
+import io.legado.app.model.ensureImageBatch
 import io.legado.app.model.localBook.LocalBook
+import io.legado.app.model.planImageCacheTrim
+import io.legado.app.model.retryDownload
 import io.legado.app.utils.ArchiveUtils
 import io.legado.app.utils.FileUtils
 import io.legado.app.utils.ImageUtils
-import io.legado.app.utils.MD5Utils
 import io.legado.app.utils.NetworkUtils
 import io.legado.app.utils.StringUtils
 import io.legado.app.utils.SvgUtils
 import io.legado.app.utils.UrlUtil
-import io.legado.app.utils.createFileIfNotExist
 import io.legado.app.utils.exists
 import io.legado.app.utils.externalFiles
 import io.legado.app.utils.getFile
@@ -30,13 +38,19 @@ import io.legado.app.utils.isContentScheme
 import io.legado.app.utils.onEachParallel
 import io.legado.app.utils.postEvent
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.apache.commons.text.similarity.JaccardSimilarity
 import splitties.init.appCtx
@@ -63,6 +77,27 @@ object BookHelp {
     /** 整本漫画下载完成的标记文件名，放在书目录下（不在 images/ 内，不会被图片清理遍历到） */
     private const val mangaFullCacheMarkName = "manga_full_cache"
     private val downloadImages = ConcurrentHashMap<String, Mutex>()
+
+    /**
+     * 统一图片缓存使用的去重锁表。
+     *
+     * 阅读页、预下载、整本下载可能同时请求同一张图，共享同一张表才能只下载一次。
+     */
+    private val imageLocks = ConcurrentHashMap<String, Mutex>()
+
+    /** 预下载的 fire-and-forget 作用域（不绑定页面生命周期，页面上滑走也要落盘） */
+    private val prefetchScope = CoroutineScope(SupervisorJob() + IO)
+
+    /** 预下载并发：低于阅读页可见图片数，避免和前台抢带宽 */
+    private val prefetchPermits = Semaphore(2)
+
+    /** 在途的预下载地址，防止同一张图被预加载器重复触发（值为占位符） */
+    private val prefetching = ConcurrentHashMap<String, Boolean>()
+
+    private const val PREFETCH_RETRY = 1
+
+    /** 单本漫画的日常阅读缓存上限；超出后按最久未修改优先清理（整本下载的书不受影响） */
+    private const val MANGA_IMAGE_CACHE_LIMIT_BYTES = 512L * 1024 * 1024
 
     val cachePath = FileUtils.getPath(downloadDir, cacheFolderName)
 
@@ -135,40 +170,63 @@ object BookHelp {
     //清除已经看过的漫画数据
     private fun clearComicCache(book: Book) {
         //只处理漫画
-        //为0的时候，不清除已缓存数据
-        if (!book.isImage || AppConfig.imageRetainNum == 0) {
+        if (!book.isImage) {
             return
         }
         //整本下载过的漫画按用户显式意图保留，不受「只保留当前章节附近图片」影响
-        if (isMangaFullCached(book)) {
-            return
-        }
-        //向前保留设定数量，向后保留预下载数量
-        val startIndex = book.durChapterIndex - AppConfig.imageRetainNum
-        val endIndex = book.durChapterIndex + AppConfig.preDownloadNum
-        val chapterList = appDb.bookChapterDao.getChapterList(book.bookUrl, startIndex, endIndex)
-        val imgNames = hashSetOf<String>()
-        //获取需要保留章节的图片信息
-        chapterList.forEach {
-            val content = getContent(book, it)
-            if (content != null) {
-                val matcher = AppPattern.imgPattern.matcher(content)
-                while (matcher.find()) {
-                    val src = matcher.group(1) ?: continue
-                    val mSrc = NetworkUtils.getAbsoluteURL(it.url, src)
-                    imgNames.add("${MD5Utils.md5Encode16(mSrc)}.${getImageSuffix(mSrc)}")
-                }
-            }
-        }
-        downloadDir.getFile(
+        val fullCached = isMangaFullCached(book)
+        //0 字节/半截文件任何时候都该清掉，否则会永久挡住重试
+        val imagesDir = downloadDir.getFile(
             cacheFolderName,
             book.getFolderName(),
             cacheImageFolderName
-        ).listFiles()?.forEach { imgFile ->
-            if (!imgNames.contains(imgFile.name)) {
-                imgFile.delete()
+        )
+        imagesDir.listFiles()?.forEach { imgFile ->
+            if (imgFile.length() <= 0) imgFile.delete()
+        }
+        //为0的时候，不清除已缓存数据
+        if (fullCached) {
+            return
+        }
+        if (AppConfig.imageRetainNum > 0) {
+            //向前保留设定数量，向后保留预下载数量
+            val startIndex = book.durChapterIndex - AppConfig.imageRetainNum
+            val endIndex = book.durChapterIndex + AppConfig.preDownloadNum
+            val chapterList = appDb.bookChapterDao.getChapterList(book.bookUrl, startIndex, endIndex)
+            val imgNames = hashSetOf<String>()
+            //获取需要保留章节的图片信息
+            chapterList.forEach {
+                val content = getContent(book, it)
+                if (content != null) {
+                    extractMangaImageUrls(it, content).forEach { mSrc ->
+                        imgNames.add(MangaImageKeys.imageFileName(mSrc))
+                    }
+                }
+            }
+            imagesDir.listFiles()?.forEach { imgFile ->
+                if (!imgNames.contains(imgFile.name)) {
+                    imgFile.delete()
+                }
             }
         }
+        //容量兜底：日常阅读会把图片越存越多，超过单本上限时按最久未用优先清理
+        trimImageCacheSize(imagesDir)
+    }
+
+    /**
+     * 单本漫画图片目录的容量兜底。
+     *
+     * 只对「未整本下载」的书生效（调用方已跳过整本缓存），
+     * 避免日常阅读无限占盘，又不动用户显式下载的内容。
+     */
+    private fun trimImageCacheSize(imagesDir: File) {
+        val files = imagesDir.listFiles()?.filter { it.isFile } ?: return
+        if (files.isEmpty()) return
+        val victims = planImageCacheTrim(
+            files.map { ImageFileInfo(it.name, it.length(), it.lastModified()) },
+            MANGA_IMAGE_CACHE_LIMIT_BYTES
+        )
+        victims.forEach { File(imagesDir, it).delete() }
     }
 
     suspend fun saveContent(
@@ -216,6 +274,45 @@ object BookHelp {
                 emit(mSrc)
             }
         }
+    }
+
+    /**
+     * 漫画专用的图片地址提取。
+     *
+     * 与 [flowImages] 的差异只有一处，但很关键：**懒加载属性优先**。
+     *
+     * 很多漫画站的标签形如
+     * `<img class="lazy" data-src="/p/2.jpg" src="/static/loading.gif">`。
+     * 既有 `imgPattern` 的 `[^>]*src=` 会匹配到最右边的 `src=`，
+     * 也就是占位图 `loading.gif`；整章所有地址因此变成同一个，
+     * 再被调用方的 `distinctUntilChanged()` 折叠成 1 张 —— 表现为
+     * 「一章几百张图，只下载/只显示第一张」。
+     *
+     * 这里按 `data-src` → `data-original` → `data-url` → `src` 的优先级取值，
+     * 标签里没有懒加载属性时（普通 `<img src>`）输出与 [flowImages] 完全一致，
+     * 不会让既有缓存失效。
+     */
+    fun flowMangaImages(bookChapter: BookChapter, content: String): Flow<String> {
+        return flow {
+            extractMangaImageUrls(bookChapter, content).forEach { emit(it) }
+        }
+    }
+
+    /** [flowMangaImages] 的非挂起版本，供清理逻辑等同步场景复用同一套提取规则 */
+    fun extractMangaImageUrls(bookChapter: BookChapter, content: String): List<String> {
+        return MangaImageExtractor.extract(bookChapter.url, content)
+    }
+
+    /**
+     * 当前章节的图片地址列表（只折叠**相邻**重复，与阅读页分页语义一致）。
+     *
+     * 与 [extractMangaImageUrls] 同一份规则：读取与下载共用，避免
+     * 「下载用的键」和「显示用的键」对不上。
+     */
+    fun chapterImageUrls(bookChapter: BookChapter, content: String): List<String> {
+        return MangaImageExtractor.collapseConsecutive(
+            extractMangaImageUrls(bookChapter, content)
+        )
     }
 
     suspend fun saveImages(
@@ -280,13 +377,13 @@ object BookHelp {
             cacheFolderName,
             book.getFolderName(),
             cacheImageFolderName,
-            "${MD5Utils.md5Encode16(src)}.${getImageSuffix(src)}"
+            MangaImageKeys.imageFileName(src)
         )
     }
 
     @Synchronized
     fun writeImage(book: Book, src: String, bytes: ByteArray) {
-        getImage(book, src).createFileIfNotExist().writeBytes(bytes)
+        writeImageAtomic(book, src, bytes)
     }
 
     @Synchronized
@@ -295,25 +392,200 @@ object BookHelp {
     }
 
     /**
-     * 图片文件存在且非空。
+     * 图片文件存在、非空**且能解码成图片**。
      *
-     * [isImageExist] 只看存在性；下载被中断可能留下 0 字节或残缺文件。
-     * 整本漫画下载的「跳过」判定与阅读页的「本地命中」判定都以本方法为准，
-     * 避免把坏文件当成已缓存，从而既不重下也显示不出来。
+     * 只看 `exists()` 会把「403 页面」「验证页 HTML」「0 字节半截文件」当成已缓存，
+     * 于是既不重下也显示不出来。命中判定、跳过判定、清理判定统一以本方法为准。
      */
-    fun isImageUsable(book: Book, src: String): Boolean {
-        val file = getImage(book, src)
-        return file.exists() && file.length() > 0
+    fun isImageUsable(book: Book, src: String): Boolean = isImageFileValid(getImage(book, src))
+
+    fun isImageFileValid(file: File): Boolean {
+        if (!file.exists() || file.length() <= 0) return false
+        return kotlin.runCatching {
+            val op = BitmapFactory.Options()
+            op.inJustDecodeBounds = true
+            BitmapFactory.decodeFile(file.absolutePath, op)
+            if (op.outWidth >= 1 && op.outHeight >= 1) {
+                true
+            } else {
+                //SVG 等非位图格式交给 SvgUtils 判尺寸
+                SvgUtils.getSize(file.absolutePath) != null
+            }
+        }.getOrDefault(false)
     }
 
     /**
-     * 与 [saveImage] 逻辑一致，但把结果显式返回给调用方。
+     * 原子写：先写 `.tmp` 再改名，避免中断留下半截文件被当成命中。
+     * 写完回读长度，确认落盘完整。
+     */
+    @Synchronized
+    private fun writeImageAtomic(book: Book, src: String, bytes: ByteArray): Boolean {
+        if (bytes.isEmpty()) return false
+        val target = getImage(book, src)
+        val dir = target.parentFile ?: return false
+        if (!dir.exists() && !dir.mkdirs()) return false
+        val tmp = File(dir, "${target.name}.tmp")
+        return try {
+            tmp.writeBytes(bytes)
+            if (target.exists() && !target.delete()) {
+                return false
+            }
+            val renamed = tmp.renameTo(target)
+            renamed && target.exists() && target.length() == bytes.size.toLong()
+        } catch (e: Exception) {
+            AppLog.put("${book.name} 图片 $src 写入缓存失败\n${e.localizedMessage}", e)
+            false
+        } finally {
+            if (tmp.exists()) tmp.delete()
+        }
+    }
+
+    /**
+     * 统一图片缓存入口（**唯一**写持久化目录的地方，供三个场景共用）：
+     * 阅读页、预下载、整本下载。
      *
-     * [saveImage] 会吞掉异常只写 AppLog，调用方无法统计成功/失败；整本下载需要准确的
-     * 失败计数与重试，所以单独提供本方法。**不修改 [saveImage] 的既有语义**，
-     * 小说缓存、正文插图等原有调用方行为不变。
+     * 契约见 [PersistentImageCache]：本地可用即命中且不联网；坏文件先删再下；
+     * 只有「有效图片 + 原子写入 + 回读校验」全部通过才返回
+     * [ImageCacheResult.STORED]/[ImageCacheResult.HIT]，否则 [ImageCacheResult.FAILED]。
+     */
+    suspend fun ensureImage(
+        bookSource: BookSource?,
+        book: Book,
+        src: String,
+        chapter: BookChapter? = null,
+    ): ImageCacheResult {
+        if (src.isBlank()) return ImageCacheResult.FAILED
+        return imageCache(bookSource, book, chapter).ensure(src)
+    }
+
+    /**
+     * 处理一整章的全部图片（逐张走 [ensureImage]）。
      *
-     * @return true 表示文件已落盘（含「本来就有」的情况）
+     * @param concurrency 在途请求上限（整本下载 4 路，预下载 2 路，章节缓存 1 路）
+     * @param retryEach 单张图片失败后的重试次数（不含首次）
+     * @param onTotal 图片地址解析完成后的总数（章节进度分母）
+     * @param onProgress 已处理张数（成功、跳过、失败都算已处理）
+     */
+    suspend fun ensureChapterImages(
+        bookSource: BookSource?,
+        book: Book,
+        chapter: BookChapter,
+        content: String,
+        concurrency: Int,
+        retryEach: Int = 0,
+        onTotal: (Int) -> Unit = {},
+        onProgress: (Int) -> Unit = {},
+    ): ImageBatchStats {
+        val urls = chapterImageUrls(chapter, content)
+        onTotal(urls.size)
+        if (urls.isEmpty()) return ImageBatchStats(0)
+        val cache = imageCache(bookSource, book, chapter)
+        return ensureImageBatch(
+            urls = urls,
+            concurrency = concurrency,
+            onProgress = onProgress,
+            ensure = { url -> ensureWithRetry(cache, url, retryEach) },
+        )
+    }
+
+    /**
+     * 单张图片按统一入口重试。
+     *
+     * 重试前会先清掉上次失败留下的残留（[PersistentImageCache] 内部处理），
+     * 所以「坏文件永久阻塞」在重试路径上也不会复现。
+     */
+    private suspend fun ensureWithRetry(
+        cache: PersistentImageCache,
+        src: String,
+        retry: Int,
+    ): ImageCacheResult {
+        var result = ImageCacheResult.FAILED
+        retryDownload(retry) {
+            result = cache.ensure(src)
+            result != ImageCacheResult.FAILED
+        }
+        return result
+    }
+
+    /**
+     * 预下载一张图：fire-and-forget，不阻塞 UI。
+     *
+     * 预加载器（`RecyclerViewPreloader`）原本只用 Glide 预热临时缓存，
+     * 换 IP/清缓存后等于没下过；这里改为真正落盘。
+     */
+    fun prefetchImage(bookSource: BookSource?, book: Book, src: String) {
+        if (src.isBlank()) return
+        if (prefetching.putIfAbsent(src, true) != null) return
+        prefetchScope.launch {
+            try {
+                prefetchPermits.withPermit {
+                    var attempt = 0
+                    while (true) {
+                        if (ensureImage(bookSource, book, src) != ImageCacheResult.FAILED) {
+                            return@withPermit
+                        }
+                        if (attempt++ >= PREFETCH_RETRY) return@withPermit
+                        kotlinx.coroutines.delay(1000L * attempt)
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLog.put("漫画图片预下载失败\n${e.localizedMessage}")
+            } finally {
+                prefetching.remove(src)
+            }
+        }
+    }
+
+    private fun imageCache(
+        bookSource: BookSource?,
+        book: Book,
+        chapter: BookChapter? = null,
+    ) = PersistentImageCache(
+        store = BookImageStore(book),
+        isValidData = { checkImage(it) },
+        fetch = { src ->
+            AnalyzeUrl(
+                src, source = bookSource, coroutineContext = currentCoroutineContext()
+            ).getByteArrayAwait()
+        },
+        locks = imageLocks,
+        onInvalidData = { src ->
+            AppLog.put("${book.name} ${chapter?.title} 图片 $src 数据异常，未写入缓存")
+        },
+        onFetchFailed = { src, e ->
+            AppLog.put("${book.name} ${chapter?.title} 图片 $src 下载失败\n${e.localizedMessage}", e)
+        },
+    )
+
+    /**
+     * [PersistentImageCache] 的 Android 侧存储实现。
+     *
+     * 删除坏文件时顺带撤销整本标记：标记只能代表「已验证的完整结果」，
+     * 一旦发现图不可用就不再成立。
+     */
+    private class BookImageStore(private val book: Book) : ImageStore {
+
+        override fun exists(key: String): Boolean = BookHelp.getImage(book, key).exists()
+
+        override fun isUsable(key: String): Boolean = BookHelp.isImageUsable(book, key)
+
+        override fun delete(key: String) {
+            val file = BookHelp.getImage(book, key)
+            if (!file.exists()) return
+            if (file.delete() && BookHelp.isMangaFullCached(book)) {
+                BookHelp.unmarkMangaFullCached(book)
+            }
+        }
+
+        override fun writeAtomic(key: String, bytes: ByteArray): Boolean =
+            BookHelp.writeImageAtomic(book, key, bytes)
+    }
+
+    /**
+     * 兼容旧调用方（整本下载、结构测试）的布尔版本。
+     * @return true 表示本地已有可用文件或本次成功落盘
      */
     suspend fun saveImageChecked(
         bookSource: BookSource?,
@@ -321,48 +593,7 @@ object BookHelp {
         src: String,
         chapter: BookChapter? = null
     ): Boolean {
-        if (isImageUsable(book, src)) {
-            return true
-        }
-        val mutex = synchronized(this) {
-            downloadImages.getOrPut(src) { Mutex() }
-        }
-        mutex.lock()
-        try {
-            if (isImageUsable(book, src)) {
-                return true
-            }
-            val analyzeUrl = AnalyzeUrl(
-                src, source = bookSource, coroutineContext = coroutineContext
-            )
-            val bytes = analyzeUrl.getByteArrayAwait()
-            //某些图片被加密，需要进一步解密
-            val decoded = runScriptWithContext {
-                ImageUtils.decode(src, bytes, isCover = false, bookSource, book)
-            } ?: return false
-            if (!checkImage(decoded)) {
-                // 与 saveImage 一致：失效图片也写盘，避免每次进正文都重新拉取
-                AppLog.put("${book.name} ${chapter?.title} 图片 $src 下载错误 数据异常")
-            }
-            writeImage(book, src, decoded)
-            return true
-        } catch (e: CancellationException) {
-            //取消不是失败，必须向上传播，否则任务停不下来
-            throw e
-        } catch (e: Exception) {
-            coroutineContext.ensureActive()
-            val msg = "${book.name} ${chapter?.title} 图片 $src 下载失败\n${e.localizedMessage}"
-            AppLog.put(msg, e)
-            return false
-        } finally {
-            //只有在没有其他协程等待时才移除，避免同一 URL 被并发重复下载
-            mutex.unlock()
-            synchronized(this) {
-                if (!mutex.isLocked) {
-                    downloadImages.remove(src)
-                }
-            }
-        }
+        return ensureImage(bookSource, book, src, chapter) != ImageCacheResult.FAILED
     }
 
     /**
@@ -389,6 +620,22 @@ object BookHelp {
             book.getFolderName(),
             mangaFullCacheMarkName
         )
+    }
+
+    /**
+     * 撤销整本标记。
+     *
+     * 标记只代表「已验证的完整结果」：一旦发现某张图不可用（坏文件被清），
+     * 或者用户取消/部分失败，都必须撤销，否则清理逻辑会把它当成受保护内容。
+     */
+    fun unmarkMangaFullCached(book: Book) {
+        runCatching {
+            downloadDir.getFile(
+                cacheFolderName,
+                book.getFolderName(),
+                mangaFullCacheMarkName
+            ).delete()
+        }
     }
 
     fun getImageSuffix(src: String): String {
@@ -465,34 +712,20 @@ object BookHelp {
 
     /**
      * 检测图片是否下载
+     *
+     * 与写入侧口径必须一致：
+     * - 地址用 [extractMangaImageUrls] 的绝对化结果（旧实现直接用原文 src，
+     *   正文里是相对地址时永远对不上，于是每轮缓存都重复下载图片）；
+     * - 命中判定用 [isImageUsable]（可解码），而不是 `exists()`。
      */
     fun hasImageContent(book: Book, bookChapter: BookChapter): Boolean {
         if (!hasContent(book, bookChapter)) {
             return false
         }
-        var ret = true
-        val op = BitmapFactory.Options()
-        op.inJustDecodeBounds = true
-        getContent(book, bookChapter)?.let {
-            val matcher = AppPattern.imgPattern.matcher(it)
-            while (matcher.find()) {
-                val src = matcher.group(1)!!
-                val image = getImage(book, src)
-                if (!image.exists()) {
-                    ret = false
-                    continue
-                }
-                BitmapFactory.decodeFile(image.absolutePath, op)
-                if (op.outWidth < 1 && op.outHeight < 1) {
-                    if (SvgUtils.getSize(image.absolutePath) != null) {
-                        continue
-                    }
-                    ret = false
-                    image.delete()
-                }
-            }
-        }
-        return ret
+        val content = getContent(book, bookChapter) ?: return false
+        val urls = extractMangaImageUrls(bookChapter, content)
+        if (urls.isEmpty()) return false
+        return urls.all { isImageUsable(book, it) }
     }
 
     private fun checkImage(bytes: ByteArray): Boolean {

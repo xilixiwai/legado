@@ -10,6 +10,7 @@ import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.BookSource
 import io.legado.app.exception.ConcurrentException
 import io.legado.app.help.book.BookHelp
+import io.legado.app.help.book.isImage
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.coroutine.CompositeCoroutine
@@ -333,8 +334,13 @@ object CacheBook {
             onDownloadSet.add(chapterIndex)
             if (BookHelp.hasContent(book, chapter)) {
                 Coroutine.async(scope, context, executeContext = context) {
-                    BookHelp.getContent(book, chapter)?.let {
-                        BookHelp.saveImages(bookSource, book, chapter, it, 1)
+                    BookHelp.getContent(book, chapter)?.let { content ->
+                        if (book.isImage) {
+                            //漫画：走统一入口（校验 + 原子写），不再用「失效也写盘」的旧接口
+                            BookHelp.ensureChapterImages(bookSource, book, chapter, content, 1)
+                        } else {
+                            BookHelp.saveImages(bookSource, book, chapter, content, 1)
+                        }
                     }
                 }.onSuccess {
                     onSuccess(chapter)
@@ -361,6 +367,11 @@ object CacheBook {
                 start = CoroutineStart.LAZY,
                 executeContext = context
             ).onSuccess { content ->
+                if (book.isImage) {
+                    //漫画首次缓存：正文刚拿到，顺手把本章全部图片落盘。
+                    //否则「缓存了这一章」其实只缓存了正文，图片仍然只有临时缓存。
+                    BookHelp.ensureChapterImages(bookSource, book, chapter, content, 1)
+                }
                 onSuccess(chapter)
                 downloadFinish(chapter, content)
             }.onError {

@@ -1,6 +1,5 @@
 package io.legado.app.ui.book.manga.recyclerview
 
-import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.drawable.Drawable
@@ -23,13 +22,31 @@ import com.bumptech.glide.load.engine.GlideException
 import com.bumptech.glide.request.RequestListener
 import com.bumptech.glide.request.target.Target
 import io.legado.app.help.book.BookHelp
+import io.legado.app.help.book.getBookSource
 import io.legado.app.help.book.isImage
-import io.legado.app.help.glide.progress.ProgressManager
 import io.legado.app.model.BookCover
+import io.legado.app.model.ImageCacheResult
 import io.legado.app.model.ReadManga
 import io.legado.app.utils.printOnDebug
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
+/**
+ * 漫画单页 ViewHolder。
+ *
+ * 图片加载全部走统一持久化入口 [BookHelp.ensureImage]：
+ * 1. 本地有可用文件 → 直接 `Glide.load(File)`，不发任何图片网络请求；
+ * 2. 本地缺失/损坏 → 由统一入口下载、校验、原子落盘，再读本地文件显示；
+ * 3. 仍然失败 → 保留「重试」按钮，下次点击重新走一遍（坏文件先删，不会被永久挡住）。
+ *
+ * 不再把 Glide 的临时磁盘缓存当作离线手段：换 IP、清缓存、系统回收之后它就没了。
+ */
 open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Context) :
     RecyclerView.ViewHolder(binding.root) {
 
@@ -40,6 +57,12 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
     protected var mRetry: Button? = null
 
     private val minHeight = context.resources.displayMetrics.heightPixels * 2 / 3
+
+    /** 单页加载作用域：滑出屏幕/被复用时取消，避免快速滑动堆积请求 */
+    private val loadScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** 递增序号，丢弃过期回调（同一个 VH 会被反复复用） */
+    private var loadSequence = 0
 
     fun initComponent(
         loading: ProgressBar,
@@ -55,77 +78,75 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
         mFlProgress = flProgress
     }
 
-    @SuppressLint("CheckResult")
     fun loadImageWithRetry(
         imageUrl: String,
         isHorizontal: Boolean,
         isLastImage: Boolean,
         transformation: Transformation<Bitmap>?
     ) {
-        loadImage(imageUrl, isHorizontal, isLastImage, transformation, preferLocal = true)
+        val book = ReadManga.book
+        if (book == null || !book.isImage || imageUrl.isBlank()) {
+            showFail()
+            return
+        }
+        val sequence = ++loadSequence
+        mImage.tag = imageUrl
+        mFlProgress.isVisible = true
+        mLoading.isVisible = true
+        //统一入口自己下载，没有流式百分比可报
+        mProgress.isVisible = false
+        mRetry?.isGone = true
+        val source = ReadManga.bookSource ?: book.getBookSource()
+        val chapter = ReadManga.curMangaChapter?.chapter
+        loadScope.launch {
+            val result = try {
+                BookHelp.ensureImage(source, book, imageUrl, chapter)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                e.printOnDebug()
+                ImageCacheResult.FAILED
+            }
+            withContext(Dispatchers.Main) {
+                if (sequence != loadSequence || mImage.tag != imageUrl) {
+                    return@withContext
+                }
+                if (result == ImageCacheResult.FAILED) {
+                    showFail()
+                } else {
+                    loadFromCache(imageUrl, isHorizontal, isLastImage, transformation)
+                }
+            }
+        }
     }
 
-    /**
-     * @param preferLocal 是否优先使用持久化缓存里的本地文件。
-     * 本地文件加载失败时会自动以 [preferLocal] = false 重试一次网络地址，
-     * 避免某张图缓存损坏导致整章永久打不开。
-     */
-    private fun loadImage(
+    /** 复用/销毁时取消在途加载 */
+    fun cancelLoad() {
+        loadSequence++
+        loadScope.coroutineContext.cancelChildren()
+    }
+
+    /** 本地文件已在统一入口校验过，这里只负责解码上屏 */
+    private fun loadFromCache(
         imageUrl: String,
         isHorizontal: Boolean,
         isLastImage: Boolean,
         transformation: Transformation<Bitmap>?,
-        preferLocal: Boolean,
     ) {
-        mFlProgress.isVisible = true
-        mLoading.isVisible = true
-        mRetry?.isGone = true
-        mProgress.isVisible = true
-        ProgressManager.removeListener(imageUrl)
-        ProgressManager.addListener(imageUrl) { _, percentage, _, _ ->
-            @SuppressLint("SetTextI18n")
-            mProgress.text = "$percentage%"
-        }
-        try {
-            mImage.tag = imageUrl
-            val localFile = if (preferLocal) localImageFile(imageUrl) else null
-            if (localFile != null) {
-                //命中本地缓存：不会再有网络百分比
-                mProgress.isVisible = false
-            }
-            val request = if (localFile != null) {
-                BookCover.loadMangaLocal(context, localFile, transformation)
-            } else {
-                BookCover.loadManga(
-                    context,
-                    imageUrl,
-                    sourceOrigin = ReadManga.book?.origin,
-                    transformation = transformation
-                )
-            }
-            request.addListener(object : RequestListener<Drawable> {
+        val file = localImageFile(imageUrl) ?: return showFail()
+        mProgress.isVisible = false
+        BookCover.loadMangaLocal(context, file, transformation)
+            .addListener(object : RequestListener<Drawable> {
                 override fun onLoadFailed(
                     e: GlideException?,
                     model: Any?,
                     target: Target<Drawable>,
                     isFirstResource: Boolean,
                 ): Boolean {
-                    if (localFile != null) {
-                        //本地文件不可读/已损坏 -> 立刻回退网络
-                        loadImage(
-                            imageUrl, isHorizontal, isLastImage, transformation,
-                            preferLocal = false
-                        )
-                        return true
-                    }
-                    mFlProgress.isVisible = true
-                    mLoading.isGone = true
-                    mRetry?.isVisible = true
-                    mProgress.isGone = true
-                    itemView.updateLayoutParams<ViewGroup.LayoutParams> {
-                        height = ViewGroup.LayoutParams.MATCH_PARENT
-                    }
-                    return false
+                    //文件通过了统一校验，却在 Glide 这层解不开：删掉，避免下次继续命中
+                    file.delete()
+                    loadNetworkFallback(imageUrl, isHorizontal, isLastImage, transformation)
+                    return true
                 }
 
                 override fun onResourceReady(
@@ -135,52 +156,100 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
                     dataSource: DataSource,
                     isFirstResource: Boolean,
                 ): Boolean {
-                    mFlProgress.isGone = true
-                    if (!isHorizontal) {
-                        itemView.updateLayoutParams<ViewGroup.LayoutParams> {
-                            height = ViewGroup.LayoutParams.WRAP_CONTENT
-                        }
-                        mImage.updateLayoutParams<FrameLayout.LayoutParams> {
-                            gravity = Gravity.NO_GRAVITY
-                        }
-                        if (isLastImage) {
-                            mImage.updateLayoutParams<FrameLayout.LayoutParams> {
-                                height = ViewGroup.LayoutParams.WRAP_CONTENT
-                            }
-                            itemView.minimumHeight = minHeight
-                        } else {
-                            mImage.updateLayoutParams<FrameLayout.LayoutParams> {
-                                height = ViewGroup.LayoutParams.MATCH_PARENT
-                            }
-                            itemView.minimumHeight = 0
-                        }
-                        mImage.scaleType = ImageView.ScaleType.FIT_XY
-                    } else {
-                        itemView.updateLayoutParams<ViewGroup.LayoutParams> {
-                            height = ViewGroup.LayoutParams.MATCH_PARENT
-                        }
-                        itemView.minimumHeight = 0
-                        mImage.updateLayoutParams<FrameLayout.LayoutParams> {
-                            height = ViewGroup.LayoutParams.MATCH_PARENT
-                            gravity = Gravity.CENTER
-                        }
-                        mImage.scaleType = ImageView.ScaleType.FIT_CENTER
-                    }
+                    applyReadyLayout(isHorizontal, isLastImage)
                     return false
                 }
-            }).into(mImage)
-        } catch (e: Exception) {
-            e.printOnDebug()
-        }
-
+            })
+            .into(mImage)
     }
 
     /**
-     * 持久化缓存命中判定。
-     *
-     * 键与 [BookHelp.saveImage] 写入时完全一致（图片绝对地址的 MD5 + 后缀），
-     * 因此不会把别的章节的图片错认成本章；同时要求文件非空，
-     * 避免把下载中断留下的 0 字节文件当成命中。
+     * 最后一道兜底：本地文件连解码都失败时，用网络地址再试一次。
+     * 只试一次，失败就交给用户点「重试」。
+     */
+    private fun loadNetworkFallback(
+        imageUrl: String,
+        isHorizontal: Boolean,
+        isLastImage: Boolean,
+        transformation: Transformation<Bitmap>?,
+    ) {
+        BookCover.loadManga(
+            context,
+            imageUrl,
+            sourceOrigin = ReadManga.book?.origin,
+            transformation = transformation
+        ).addListener(object : RequestListener<Drawable> {
+            override fun onLoadFailed(
+                e: GlideException?,
+                model: Any?,
+                target: Target<Drawable>,
+                isFirstResource: Boolean,
+            ): Boolean {
+                showFail()
+                return false
+            }
+
+            override fun onResourceReady(
+                resource: Drawable,
+                model: Any,
+                target: Target<Drawable>?,
+                dataSource: DataSource,
+                isFirstResource: Boolean,
+            ): Boolean {
+                applyReadyLayout(isHorizontal, isLastImage)
+                return false
+            }
+        }).into(mImage)
+    }
+
+    private fun applyReadyLayout(isHorizontal: Boolean, isLastImage: Boolean) {
+        mFlProgress.isGone = true
+        mProgress.isVisible = false
+        if (!isHorizontal) {
+            itemView.updateLayoutParams<ViewGroup.LayoutParams> {
+                height = ViewGroup.LayoutParams.WRAP_CONTENT
+            }
+            mImage.updateLayoutParams<FrameLayout.LayoutParams> {
+                gravity = Gravity.NO_GRAVITY
+            }
+            if (isLastImage) {
+                mImage.updateLayoutParams<FrameLayout.LayoutParams> {
+                    height = ViewGroup.LayoutParams.WRAP_CONTENT
+                }
+                itemView.minimumHeight = minHeight
+            } else {
+                mImage.updateLayoutParams<FrameLayout.LayoutParams> {
+                    height = ViewGroup.LayoutParams.MATCH_PARENT
+                }
+                itemView.minimumHeight = 0
+            }
+            mImage.scaleType = ImageView.ScaleType.FIT_XY
+        } else {
+            itemView.updateLayoutParams<ViewGroup.LayoutParams> {
+                height = ViewGroup.LayoutParams.MATCH_PARENT
+            }
+            itemView.minimumHeight = 0
+            mImage.updateLayoutParams<FrameLayout.LayoutParams> {
+                height = ViewGroup.LayoutParams.MATCH_PARENT
+                gravity = Gravity.CENTER
+            }
+            mImage.scaleType = ImageView.ScaleType.FIT_CENTER
+        }
+    }
+
+    private fun showFail() {
+        mFlProgress.isVisible = true
+        mLoading.isGone = true
+        mRetry?.isVisible = true
+        mProgress.isGone = true
+        itemView.updateLayoutParams<ViewGroup.LayoutParams> {
+            height = ViewGroup.LayoutParams.MATCH_PARENT
+        }
+    }
+
+    /**
+     * 命中判定与统一入口同一套规则（存在 + 非空 + 可解码），
+     * 避免「文件在但打不开」被当成命中。
      */
     private fun localImageFile(imageUrl: String): File? {
         val book = ReadManga.book ?: return null

@@ -596,7 +596,9 @@ object ReadManga : CoroutineScope by MainScope() {
     }
 
     private suspend fun getManageChapter(chapter: BookChapter, content: String): MangaChapter {
-        val list = BookHelp.flowImages(chapter, content)
+        // 与下载侧共用同一套地址提取规则：懒加载属性优先，
+        // 否则整章会退化成一张占位图（见 BookHelp.flowMangaImages 注释）
+        val list = BookHelp.flowMangaImages(chapter, content)
             .distinctUntilChanged().mapIndexed { index, src ->
                 MangaPage(
                     chapterIndex = chapter.index,

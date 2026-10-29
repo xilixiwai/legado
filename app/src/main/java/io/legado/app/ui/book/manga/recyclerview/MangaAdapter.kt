@@ -22,8 +22,8 @@ import io.legado.app.base.adapter.ItemViewHolder
 import io.legado.app.base.adapter.RecyclerAdapter.Companion.TYPE_FOOTER_VIEW
 import io.legado.app.databinding.ItemBookMangaEdgeBinding
 import io.legado.app.databinding.ItemBookMangaPageBinding
-import io.legado.app.help.glide.progress.ProgressManager
-import io.legado.app.model.BookCover
+import io.legado.app.help.book.BookHelp
+import io.legado.app.help.book.getBookSource
 import io.legado.app.model.ReadManga
 import io.legado.app.ui.book.manga.config.MangaColorFilterConfig
 import io.legado.app.ui.book.manga.entities.EpaperTransformation
@@ -184,10 +184,9 @@ class MangaAdapter(private val context: Context) :
                 vh.itemView.updateLayoutParams<ViewGroup.LayoutParams> {
                     height = MATCH_PARENT
                 }
+                //先取消在途的图片落盘任务，再清 Glide 请求，避免复用后旧回调写错 View
+                vh.cancelLoad()
                 Glide.with(context).clear(vh.binding.image)
-                if (vh.binding.image.tag is String) {
-                    ProgressManager.removeListener(vh.binding.image.tag as String)
-                }
             }
         }
     }
@@ -236,12 +235,18 @@ class MangaAdapter(private val context: Context) :
 
     override fun getPreloadRequestBuilder(item: Any): RequestBuilder<*>? {
         if (item is MangaPage) {
-            return BookCover.preloadManga(
-                context,
-                item.mImageUrl,
-                sourceOrigin = ReadManga.book?.origin,
-            )
+            val book = ReadManga.book ?: return null
+            //预下载：真正落盘（与阅读、整本下载同一个统一入口），不再只预热 Glide 临时缓存。
+            //命中本地时这里什么都不做，避免重复下载。
+            if (!BookHelp.isImageUsable(book, item.mImageUrl)) {
+                BookHelp.prefetchImage(
+                    ReadManga.bookSource ?: book.getBookSource(),
+                    book,
+                    item.mImageUrl
+                )
+            }
         }
+        //返回 null：图片由统一入口负责下载与落盘，Glide 不再重复请求
         return null
     }
 
