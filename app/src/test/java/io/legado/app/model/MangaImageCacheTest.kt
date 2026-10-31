@@ -13,7 +13,9 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -181,6 +183,93 @@ class MangaImageCacheTest {
     }
 
     // ---------- 3. 坏文件可恢复 ----------
+
+    @Test
+    fun `缓存命中不请求网络也不交接网络字节`() = runBlocking {
+        val store = FakeStore().apply { files["cached"] = validImage }
+        assertEquals(ImageCacheResult.HIT, cache(store) { error("不应下载") }.ensure("cached") {
+            error("命中不应执行解密或交接网络数据")
+        })
+        assertEquals(0, store.deletes)
+    }
+
+    @Test
+    fun `写盘失败仍交接同一份有效字节且不重复下载`() = runBlocking {
+        val store = FakeStore().apply { failWrites = true }
+        var fetched = 0
+        var received: ByteArray? = null
+        val result = cache(store) { fetched++; validImage }.ensure("failed-write") { received = it }
+        assertEquals(ImageCacheResult.FAILED, result)
+        assertSame(validImage, received)
+        assertEquals(1, fetched)
+        assertFalse(store.exists("failed-write"))
+        assertEquals(0, store.deletes)
+    }
+
+    @Test
+    fun `写盘成功仍返回持久缓存成功且再次命中不交接数据`() = runBlocking {
+        val store = FakeStore()
+        var fetched = 0
+        var delivered = 0
+        val cache = cache(store) { fetched++; validImage }
+        assertEquals(ImageCacheResult.STORED, cache.ensure("stored") { delivered++; assertSame(validImage, it) })
+        assertEquals(ImageCacheResult.HIT, cache.ensure("stored") { error("命中不能回调") })
+        assertEquals(1, fetched)
+        assertEquals(1, delivered)
+        assertArrayEquals(validImage, store.files["stored"])
+    }
+
+    @Test
+    fun `下载失败空响应和格式校验失败均不交接显示数据`() = runBlocking {
+        val fetchers: List<suspend (String) -> ByteArray?> = listOf(
+            { throw IllegalStateException("network failed") }, { null }, { byteArrayOf() }, { htmlErrorPage },
+        )
+        fetchers.forEach { fetch ->
+            val store = FakeStore()
+            assertEquals(ImageCacheResult.FAILED, cache(store, fetch).ensure("invalid") {
+                error("失败数据不能交给显示入口")
+            })
+            assertTrue(store.files.isEmpty())
+        }
+    }
+
+    @Test
+    fun `回退显示保留优化前已经校验的字节`() = runBlocking {
+        val store = FakeStore().apply { failWrites = true }
+        var received: ByteArray? = null
+        val optimized = validImage.copyOf(10)
+        val cache = cacheWith(store, { optimized }, { validImage })
+        assertEquals(ImageCacheResult.FAILED, cache.ensure("optimized") { received = it })
+        assertSame(validImage, received)
+        assertNotSame(optimized, received)
+    }
+
+    @Test
+    fun `写入异常前已经交接有效图片数据`() = runBlocking {
+        val store = object : ImageStore by FakeStore() {
+            override fun writeAtomic(key: String, bytes: ByteArray): Boolean =
+                throw IllegalStateException("write failed")
+        }
+        var received: ByteArray? = null
+        try {
+            cache(store) { validImage }.ensure("exception") { received = it }
+            fail("应保留原有异常传播语义")
+        } catch (_: IllegalStateException) {
+            assertSame(validImage, received)
+        }
+    }
+
+    @Test
+    fun `写后读取不可用仍保留显示数据但不报告持久成功`() = runBlocking {
+        val files = FakeStore()
+        val store = object : ImageStore by files {
+            override fun isUsable(key: String) = false
+        }
+        var received: ByteArray? = null
+        assertEquals(ImageCacheResult.FAILED, cache(store) { validImage }.ensure("readback") { received = it })
+        assertSame(validImage, received)
+        assertEquals(0, files.deletes)
+    }
 
     @Test
     fun `已有损坏文件在新图写入前不预先删除`() {

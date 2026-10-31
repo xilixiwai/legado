@@ -113,8 +113,29 @@ class ImageUtilsDecodeTest {
             fetch = { decode(encrypted(), source("throw 'failed';")) },
             optimize = { error("不能优化") },
         )
-        assertEquals(ImageCacheResult.FAILED, cache.ensure(src))
+        assertEquals(ImageCacheResult.FAILED, cache.ensure(src) { error("解密失败不能交给显示入口") })
         assertEquals(1, failures)
+    }
+
+    @Test
+    fun `解密成功写盘失败仍可复用解密后图片且不再请求网络`() = runBlocking {
+        var downloaded = 0
+        var displayData: ByteArray? = null
+        val store = object : ImageStore {
+            override fun exists(key: String) = false
+            override fun isUsable(key: String) = false
+            override fun delete(key: String) = error("不能删除旧图")
+            override fun writeAtomic(key: String, bytes: ByteArray) = false
+        }
+        val cache = PersistentImageCache(store,
+            isValidData = { JvmImageFixture.read(it.inputStream()) != null },
+            fetch = { downloaded++; decode(encrypted(), source(xorRule)) },
+        )
+        assertEquals(ImageCacheResult.FAILED, cache.ensure(src) { displayData = it })
+        assertArrayEquals(png, displayData)
+        assertEquals(2, JvmImageFixture.width(JvmImageFixture.read(displayData!!.inputStream())!!))
+        assertEquals(1, downloaded)
+        assertEquals(1, evaluated)
     }
 
     @Test

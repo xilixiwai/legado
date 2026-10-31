@@ -89,11 +89,15 @@ class PersistentImageCache(
     private val optimize: suspend (ByteArray) -> ByteArray = { it },
 ) {
 
-    suspend fun ensure(key: String): ImageCacheResult {
+    /**
+     * [onImageData] 只接收本次获取并通过校验的字节，供阅读页在落盘失败时显示。
+     * 命中不回调；调用方只读使用，不影响原有持久化结果。
+     */
+    suspend fun ensure(key: String, onImageData: ((ByteArray) -> Unit)? = null): ImageCacheResult {
         if (store.isUsable(key)) return ImageCacheResult.HIT
         val mutex = lockFor(key)
         val result = try {
-            mutex.withLock { ensureLocked(key) }
+            mutex.withLock { ensureLocked(key, onImageData) }
         } finally {
             pruneLocks()
         }
@@ -112,7 +116,7 @@ class PersistentImageCache(
         return locks.putIfAbsent(key, created) ?: created
     }
 
-    private suspend fun ensureLocked(key: String): ImageCacheResult {
+    private suspend fun ensureLocked(key: String, onImageData: ((ByteArray) -> Unit)?): ImageCacheResult {
         //等锁期间可能已被别的协程写好
         if (store.isUsable(key)) return ImageCacheResult.HIT
         val bytes = try {
@@ -128,6 +132,8 @@ class PersistentImageCache(
             onInvalidData(key)
             return ImageCacheResult.FAILED
         }
+        //在优化和写入前交接已经校验的原始数据；失败时阅读页仍能用同一份字节显示。
+        onImageData?.invoke(bytes)
         //压缩只影响落盘体积，失败/变大都回退到原始字节，不改变「已成功下载」的事实
         val payload = optimizeOrOriginal(key, bytes)
         if (!store.writeAtomic(key, payload)) return ImageCacheResult.FAILED

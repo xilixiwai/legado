@@ -221,6 +221,56 @@ class MangaImageFileTest {
     }
 
     @Test
+    fun `临时文件写入失败仍交接有效图片且旧候选不变`() = runBlocking {
+        assertDisplayDataAfterWriteFailure { target, bytes ->
+            try {
+                writeImageCandidate(target, bytes, ::usable, write = { candidate, _ ->
+                    candidate.writeBytes(byteArrayOf(1))
+                    throw IOException("disk full")
+                })
+            } catch (_: IOException) {
+                false //与BookHelp写入入口捕获IO错误的行为一致。
+            }
+        }
+    }
+
+    @Test
+    fun `文件替换失败保留旧候选并交接新的有效图片`() = runBlocking {
+        assertDisplayDataAfterWriteFailure { target, bytes ->
+            writeImageCandidate(target, bytes, ::usable, replace = { _, _ -> false })
+        }
+    }
+
+    @Test
+    fun `落盘候选校验失败仍保留优化前的有效显示数据`() = runBlocking {
+        assertDisplayDataAfterWriteFailure { target, bytes ->
+            writeImageCandidate(target, bytes, validate = { false })
+        }
+    }
+
+    private suspend fun assertDisplayDataAfterWriteFailure(write: (File, ByteArray) -> Boolean) {
+        val oldBytes = byteArrayOf(8, 9)
+        val old = file("mcache", oldBytes)
+        var fetched = 0
+        var displayData: ByteArray? = null
+        val store = object : ImageStore by store() {
+            override fun writeAtomic(key: String, bytes: ByteArray) = write(old, bytes)
+        }
+        val cache = PersistentImageCache(store,
+            isValidData = { JvmImageFixture.read(it.inputStream()) != null },
+            fetch = { fetched++; png },
+        )
+        assertEquals(ImageCacheResult.FAILED, cache.ensure(src) { displayData = it })
+        assertSame(png, displayData)
+        val image = JvmImageFixture.read(displayData!!.inputStream())!!
+        assertEquals(2, JvmImageFixture.width(image))
+        assertEquals(0x80402010.toInt(), JvmImageFixture.pixel(image))
+        assertEquals(1, fetched)
+        assertArrayEquals(oldBytes, old.readBytes())
+        assertEquals(1, temp.root.listFiles()!!.size)
+    }
+
+    @Test
     fun `小说插图仍允许保存无效响应以避免反复下载`() {
         //对应 BookHelp 小说分支 validate 的原有宽松策略；不改为漫画的严格图片校验。
         val target = File(temp.root, "novel.jpg")

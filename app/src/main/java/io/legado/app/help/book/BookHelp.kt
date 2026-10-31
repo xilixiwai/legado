@@ -659,7 +659,7 @@ object BookHelp {
      * 统一图片缓存入口（**唯一**写持久化目录的地方，供三个场景共用）：
      * 阅读页、预下载、整本下载。
      *
-     * 契约见 [PersistentImageCache]：本地可用即命中且不联网；坏文件先删再下；
+     * 契约见 [PersistentImageCache]：本地可用即命中且不联网，失败保留旧候选；
      * 只有「有效图片 + 原子写入 + 回读校验」全部通过才返回
      * [ImageCacheResult.STORED]/[ImageCacheResult.HIT]，否则 [ImageCacheResult.FAILED]。
      */
@@ -668,9 +668,10 @@ object BookHelp {
         book: Book,
         src: String,
         chapter: BookChapter? = null,
+        onImageData: ((ByteArray) -> Unit)? = null,
     ): ImageCacheResult {
         if (src.isBlank()) return ImageCacheResult.FAILED
-        return imageCache(bookSource, book, chapter).ensure(src)
+        return imageCache(bookSource, book, chapter).ensure(src, onImageData)
     }
 
     /**

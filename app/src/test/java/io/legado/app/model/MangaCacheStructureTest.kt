@@ -233,14 +233,29 @@ class MangaCacheStructureTest {
     }
 
     @Test
-    fun `阅读页先落盘再显示本地文件`() {
+    fun `阅读页优先本地文件且写入失败复用内存数据`() {
         val src = DiagSourceText.source(mangaVhPath)
         val loadBlock = DiagSourceText.block(src, "fun loadImageWithRetry(", "fun cancelLoad()")
         DiagSourceText.assertOrder(
             loadBlock,
-            "BookHelp.ensureImage(source, book, imageUrl, chapter)",
-            "loadFromCache(imageUrl"
+            "BookHelp.ensureImage(source, book, imageUrl, chapter, onImageData = { imageData = it })",
+            "if (result != ImageCacheResult.FAILED)",
+            "loadFromCache(imageUrl",
+            "else if (bytes != null)",
+            "loadFromBytes(imageUrl"
         )
+        //结构检查只验证接线，不替代Android/Glide实际显示测试。
+        val memoryBlock = DiagSourceText.block(src, "private fun loadFromBytes(", "private fun loadFromCache(")
+        assertTrue(memoryBlock, memoryBlock.contains("ImageLoader.load(context, bytes)"))
+        assertTrue(memoryBlock, memoryBlock.contains("DiskCacheStrategy.NONE"))
+        assertTrue(memoryBlock, memoryBlock.contains("skipMemoryCache(true)"))
+        assertTrue(memoryBlock, memoryBlock.contains("builder.transform(transformation)"))
+        assertTrue(memoryBlock, memoryBlock.contains("sequence != loadSequence || mImage.tag != imageUrl"))
+        assertFalse("内存回退不能再次请求网络", memoryBlock.contains("loadNetworkFallback("))
+        assertFalse("内存回退不能删除旧缓存", memoryBlock.contains(".delete()"))
+        val loader = DiagSourceText.source("app/src/main/java/io/legado/app/help/glide/ImageLoader.kt")
+        val byteLoader = DiagSourceText.block(loader, "fun load(context: Context, bytes: ByteArray?)", "\n}")
+        assertTrue(byteLoader, byteLoader.contains("Glide.with(context).load(bytes)"))
         //显示阶段只读本地文件，不联网
         val cacheBlock = DiagSourceText.block(src, "private fun loadFromCache(", "private fun loadNetworkFallback(")
         assertTrue(cacheBlock, cacheBlock.contains("BookCover.loadMangaLocal(context, file, transformation)"))

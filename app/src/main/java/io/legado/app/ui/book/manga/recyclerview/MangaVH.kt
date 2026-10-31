@@ -18,12 +18,14 @@ import androidx.recyclerview.widget.RecyclerView
 import androidx.viewbinding.ViewBinding
 import com.bumptech.glide.load.DataSource
 import com.bumptech.glide.load.Transformation
+import com.bumptech.glide.load.engine.DiskCacheStrategy
 import com.bumptech.glide.load.engine.GlideException
 import com.bumptech.glide.request.RequestListener
 import com.bumptech.glide.request.target.Target
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.getBookSource
 import io.legado.app.help.book.isImage
+import io.legado.app.help.glide.ImageLoader
 import io.legado.app.model.BookCover
 import io.legado.app.model.ImageCacheResult
 import io.legado.app.model.ReadManga
@@ -42,8 +44,9 @@ import java.io.File
  *
  * 图片加载全部走统一持久化入口 [BookHelp.ensureImage]：
  * 1. 本地有可用文件 → 直接 `Glide.load(File)`，不发任何图片网络请求；
- * 2. 本地缺失/损坏 → 由统一入口下载、校验、原子落盘，再读本地文件显示；
- * 3. 仍然失败 → 保留「重试」按钮，下次点击重新走一遍（坏文件先删，不会被永久挡住）。
+ * 2. 本地缺失/损坏 → 由统一入口下载、解密、校验，落盘成功后读文件显示；
+ * 3. 落盘失败但已获取有效字节 → 直接交给 Glide 显示，不重复联网；
+ * 4. 下载、解密、校验或最终显示失败 → 保留「重试」按钮。
  *
  * 不再把 Glide 的临时磁盘缓存当作离线手段：换 IP、清缓存、系统回收之后它就没了。
  */
@@ -99,8 +102,9 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
         val source = ReadManga.bookSource ?: book.getBookSource()
         val chapter = ReadManga.curMangaChapter?.chapter
         loadScope.launch {
+            var imageData: ByteArray? = null
             val result = try {
-                BookHelp.ensureImage(source, book, imageUrl, chapter)
+                BookHelp.ensureImage(source, book, imageUrl, chapter, onImageData = { imageData = it })
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -111,10 +115,13 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
                 if (sequence != loadSequence || mImage.tag != imageUrl) {
                     return@withContext
                 }
-                if (result == ImageCacheResult.FAILED) {
-                    showFail()
-                } else {
+                val bytes = imageData
+                if (result != ImageCacheResult.FAILED) {
                     loadFromCache(imageUrl, isHorizontal, isLastImage, transformation)
+                } else if (bytes != null) {
+                    loadFromBytes(imageUrl, sequence, bytes, isHorizontal, isLastImage, transformation)
+                } else {
+                    showFail()
                 }
             }
         }
@@ -124,6 +131,44 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
     fun cancelLoad() {
         loadSequence++
         loadScope.coroutineContext.cancelChildren()
+    }
+
+    /** 只使用本次已解密且通过校验的数据；缓存失败不触发另一轮网络加载。 */
+    private fun loadFromBytes(
+        imageUrl: String,
+        sequence: Int,
+        bytes: ByteArray,
+        isHorizontal: Boolean,
+        isLastImage: Boolean,
+        transformation: Transformation<Bitmap>?,
+    ) {
+        var builder = ImageLoader.load(context, bytes)
+            .diskCacheStrategy(DiskCacheStrategy.NONE)
+            .skipMemoryCache(true)
+        if (transformation != null) builder = builder.transform(transformation)
+        builder.addListener(object : RequestListener<Drawable> {
+            override fun onLoadFailed(
+                e: GlideException?,
+                model: Any?,
+                target: Target<Drawable>,
+                isFirstResource: Boolean,
+            ): Boolean {
+                if (sequence == loadSequence && mImage.tag == imageUrl) showFail()
+                return true
+            }
+
+            override fun onResourceReady(
+                resource: Drawable,
+                model: Any,
+                target: Target<Drawable>?,
+                dataSource: DataSource,
+                isFirstResource: Boolean,
+            ): Boolean {
+                if (sequence != loadSequence || mImage.tag != imageUrl) return true
+                applyReadyLayout(isHorizontal, isLastImage)
+                return false
+            }
+        }).into(mImage)
     }
 
     /** 本地文件已在统一入口校验过，这里只负责解码上屏 */
