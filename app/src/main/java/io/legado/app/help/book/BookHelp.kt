@@ -425,9 +425,9 @@ object BookHelp {
     /**
      * 图片缓存文件。
      *
-     * 返回**实际存在**的那个文件：先找新后缀 `.mcache`/`.svg`，再找旧版 URL 后缀，
+     * 漫画逐个验证候选，小说保留存在性查找：先找 `.mcache`/`.svg`，再找旧版 URL 后缀，
      * 都没有时返回旧命名路径（`ImageProvider` 等小说侧调用方原有行为不变）。
-     * 新旧命名共用同一个 MD5 前缀，所以同一张图不会因为换后缀变成两份缓存。
+     * 新旧命名共用同一个 MD5 前缀，读取不会改名、解密或删除历史候选。
      */
     fun getImage(book: Book, src: String): File {
         val dir = imageDir(book)
@@ -435,7 +435,10 @@ object BookHelp {
         val existing = MangaImageContent.resolveExistingCacheName(
             baseName = base,
             urlSuffix = getImageSuffix(src),
-            exists = { name -> File(dir, name).exists() }
+            exists = { name ->
+                val file = File(dir, name)
+                if (book.isImage) isImageFileValid(file) else file.exists()
+            }
         )
         return File(dir, existing ?: MangaImageKeys.legacyImageFileName(src))
     }
@@ -466,7 +469,15 @@ object BookHelp {
             op.inJustDecodeBounds = true
             BitmapFactory.decodeFile(file.absolutePath, op)
             if (op.outWidth >= 1 && op.outHeight >= 1) {
-                true
+                //只读尺寸无法发现部分截断图片；缩小解码用于验证，不改变保存或显示的图片。
+                val decodeOptions = BitmapFactory.Options()
+                var sample = 1
+                while (max(op.outWidth, op.outHeight) / sample > 512) sample *= 2
+                decodeOptions.inSampleSize = sample
+                val bitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOptions)
+                val valid = bitmap != null
+                bitmap?.recycle()
+                valid
             } else {
                 //SVG 等非位图格式交给 SvgUtils 判尺寸
                 SvgUtils.getSize(file.absolutePath) != null
@@ -476,14 +487,13 @@ object BookHelp {
 
     /**
      * 原子写：先写 `.tmp` 再改名，避免中断留下半截文件被当成命中。
-     * 写完回读长度，确认落盘完整。
+     * 写完校验候选文件，覆盖式改名不受支持时保留旧文件并报告失败。
      *
      * 后缀按**内容**决定（`MangaImageContent.suffixFor`）：
      * - 漫画：已知位图统一 `.<mcache>`，SVG 保持 `.svg`；
      * - 小说/正文插图：沿用 URL 后缀，行为与升级前完全一致。
      *
-     * 新文件校验通过后才删除同一 MD5 前缀的旧后缀文件（迁移），
-     * 中途失败不会动旧文件，避免「新的没写成功、旧的已经没了」。
+     * 漫画读取时不自动删除旧后缀候选；小说保留原有成功后清理副本的行为。
      */
     @Synchronized
     private fun writeImageAtomic(book: Book, src: String, bytes: ByteArray): Boolean {
@@ -497,23 +507,16 @@ object BookHelp {
             getImageSuffix(src)
         }
         val target = File(dir, MangaImageKeys.imageFileName(src, suffix))
-        val tmp = File(dir, "${target.name}.tmp")
         val written = try {
-            tmp.writeBytes(bytes)
-            //同目录 rename 在 Android/Linux 上是原子覆盖：先试这一步，旧文件在成功前不动
-            var renamed = tmp.renameTo(target)
-            if (!renamed && target.exists()) {
-                //个别文件系统不支持覆盖式 rename，退回到「删旧 + 改名」，此时才可能丢旧文件
-                if (target.delete()) renamed = tmp.renameTo(target)
-            }
-            renamed && target.exists() && target.length() == bytes.size.toLong()
+            writeImageCandidate(target, bytes, validate = { candidate ->
+                //小说失效插图仍按原行为保存响应，避免每次进入正文反复请求。
+                !book.isImage || isImageFileValid(candidate)
+            })
         } catch (e: Exception) {
             AppLog.put("${book.name} 图片 $src 写入缓存失败\n${e.localizedMessage}", e)
             false
-        } finally {
-            if (tmp.exists()) tmp.delete()
         }
-        if (written) {
+        if (written && !book.isImage) {
             //新文件已校验落盘，清掉同一张图的旧后缀副本，避免一份图两份空间
             deleteStaleVariants(dir, src, keepName = target.name)
         }
@@ -703,8 +706,7 @@ object BookHelp {
     /**
      * 单张图片按统一入口重试。
      *
-     * 重试前会先清掉上次失败留下的残留（[PersistentImageCache] 内部处理），
-     * 所以「坏文件永久阻塞」在重试路径上也不会复现。
+     * 每次重新检查候选，失败时保留旧文件；不可用的候选不会阻止重新获取。
      */
     private suspend fun ensureWithRetry(
         cache: PersistentImageCache,
@@ -758,9 +760,17 @@ object BookHelp {
         store = BookImageStore(book),
         isValidData = { checkImage(it) },
         fetch = { src ->
-            AnalyzeUrl(
+            val bytes = AnalyzeUrl(
                 src, source = bookSource, coroutineContext = currentCoroutineContext()
             ).getByteArrayAwait()
+            //只处理新网络字节，命中历史缓存不会再次执行书源解密。
+            if (book.isImage) {
+                runScriptWithContext {
+                    ImageUtils.decode(src, bytes, isCover = false, bookSource, book)
+                }
+            } else {
+                bytes
+            }
         },
         locks = imageLocks,
         onInvalidData = { src ->

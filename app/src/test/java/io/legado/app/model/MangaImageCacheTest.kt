@@ -183,7 +183,7 @@ class MangaImageCacheTest {
     // ---------- 3. 坏文件可恢复 ----------
 
     @Test
-    fun `已有损坏文件会先删除再重新下载`() {
+    fun `已有损坏文件在新图写入前不预先删除`() {
         runBlocking {
             val store = FakeStore()
             store.files["https://a.test/p/8.jpg"] = htmlErrorPage
@@ -194,7 +194,7 @@ class MangaImageCacheTest {
             }.ensure("https://a.test/p/8.jpg")
             assertEquals(ImageCacheResult.STORED, result)
             assertEquals(1, fetched)
-            assertEquals("坏文件必须被删掉", 1, store.deletes)
+            assertEquals("不能先删旧文件再尝试下载", 0, store.deletes)
             assertTrue(store.isUsable("https://a.test/p/8.jpg"))
         }
     }

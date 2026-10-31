@@ -177,14 +177,12 @@ class MangaCacheStructureTest {
     }
 
     @Test
-    fun `统一入口先删坏文件再下载且校验后才算成功`() {
+    fun `统一入口保留旧文件且校验后才算成功`() {
         val src = DiagSourceText.source(imageCachePath)
         val ensureBlock = DiagSourceText.block(src, "private suspend fun ensureLocked(", "private fun pruneLocks()")
         DiagSourceText.assertOrder(
             ensureBlock,
             "if (store.isUsable(key)) return ImageCacheResult.HIT",
-            "if (store.exists(key))",
-            "store.delete(key)",
             "fetch(key)",
             "isValidData(bytes)",
             //落盘前压缩：结果不允许变大的判断在纯函数里，这里只要求先优化再写
@@ -195,6 +193,10 @@ class MangaCacheStructureTest {
         assertTrue(ensureBlock, ensureBlock.contains("bytes.isEmpty() || !isValidData(bytes)"))
         //写后回读
         assertTrue(ensureBlock, ensureBlock.contains("if (!store.isUsable(key))"))
+        assertFalse("失败路径不能删除旧候选", ensureBlock.contains("store.delete(key)"))
+        val bookHelp = DiagSourceText.source(bookHelpPath)
+        val fetchBlock = DiagSourceText.block(bookHelp, "private fun imageCache(", "locks = imageLocks")
+        DiagSourceText.assertOrder(fetchBlock, "getByteArrayAwait()", "if (book.isImage)", "ImageUtils.decode(src, bytes, isCover = false, bookSource, book)")
     }
 
     @Test
@@ -277,8 +279,8 @@ class MangaCacheStructureTest {
         )
         assertTrue(writeBlock, writeBlock.contains("} else {\n            getImageSuffix(src)"))
         assertTrue(writeBlock, writeBlock.contains("MangaImageKeys.imageFileName(src, suffix)"))
-        //新文件校验成功后才清旧副本
-        DiagSourceText.assertOrder(bookHelp, "if (written) {", "deleteStaleVariants(")
+        //漫画不自动删除旧候选；小说保留成功后清理副本的既有行为
+        DiagSourceText.assertOrder(bookHelp, "if (written && !book.isImage) {", "deleteStaleVariants(")
         //缓存根目录放 .nomedia：降低被相册/媒体库扫描的概率（不是加密）
         assertTrue(bookHelp, bookHelp.contains("\".nomedia\""))
         //命中判定按文件内容

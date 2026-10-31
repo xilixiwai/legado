@@ -5,17 +5,15 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 阶段 0 的既有行为基线，不代表未来处理记录、解密或 Android 文件提交已经实现。
  * 只使用内存存储；字节可用性是假实现，不声称验证真实图片解码。
- * 阶段 1 增补纯身份选择测试；实际执行记录见 PROJECT_STATE.md。
+ * 仅保护当前业务行为，不依赖已废弃的新身份模型。
  */
 class MangaCacheLegacyCompatibilityTest {
 
@@ -82,7 +80,6 @@ class MangaCacheLegacyCompatibilityTest {
         )
 
         assertEquals(inputs.size, inputs.map { MangaImageKeys.baseName(it) }.toSet().size)
-        // 外部 Cookie/Header 不在 src 中的情况，由阶段 1 的新资源身份测试覆盖。
     }
 
     @Test
@@ -96,58 +93,6 @@ class MangaCacheLegacyCompatibilityTest {
         assertNull(
             MangaImageContent.resolveExistingCacheName(base, "PNG") { false },
         )
-    }
-
-    @Test
-    fun `新旧缓存同时存在时精确新身份优先`() {
-        val resource = imageResource()
-        val record = ImageProcessingRecord(resource, imageDigest, 10, ImageDecodeState.NONE)
-        val result = selectImageCache(resource, record, imageDigest, 10, true,
-            LegacyImageLocator("book", "https://cdn.test/a"), true)
-        assertEquals(ImageCacheSelection.Exact(record), result)
-    }
-
-    @Test
-    fun `新记录不存在或不匹配时旧缓存仅为未知历史状态`() {
-        val resource = imageResource()
-        val legacy = LegacyImageLocator("book", "https://cdn.test/a")
-        val records = listOf(null,
-            ImageProcessingRecord(imageResource(book = "other"), imageDigest, 10, ImageDecodeState.NONE))
-        records.forEach { record ->
-            val result = selectImageCache(resource, record, imageDigest, 10, true, legacy, true)
-            assertTrue(result is ImageCacheSelection.Legacy)
-            result as ImageCacheSelection.Legacy
-            assertEquals(ImageDecodeState.UNKNOWN, result.decodeState)
-            assertFalse(result.mayAutomaticallyDecode)
-            assertFalse(result.mayAutomaticallyDelete)
-            assertFalse(result.mayAutomaticallyReload)
-            assertFalse(result.mayAutomaticallyConfirm)
-        }
-    }
-
-    @Test
-    fun `新缓存字节摘要长度或可读性不符不能确认命中`() {
-        val resource = imageResource()
-        val record = ImageProcessingRecord(resource, imageDigest, 10, ImageDecodeState.NONE)
-        assertEquals(ImageCacheSelection.Missing,
-            selectImageCache(resource, record, imageDigest, 11, true, null, false))
-        assertEquals(ImageCacheSelection.Missing,
-            selectImageCache(resource, record, ImageFingerprint("b".repeat(64)), 10, true, null, false))
-        assertEquals(ImageCacheSelection.Missing,
-            selectImageCache(resource, record, imageDigest, 10, false, null, false))
-    }
-
-    @Test
-    fun `不可读未知旧文件也不降为缺失或允许自动重下载`() {
-        val result = selectImageCache(imageResource(), null, null, null, false,
-            LegacyImageLocator("book", "https://cdn.test/a"), false)
-        assertTrue(result is ImageCacheSelection.Legacy)
-        result as ImageCacheSelection.Legacy
-        assertFalse(result.readable)
-        assertFalse(result.mayAutomaticallyReload)
-        assertFalse(result.mayAutomaticallyDelete)
-        assertEquals(ImageDecodeState.UNKNOWN, result.decodeState)
-        assertEquals(ImageCacheHitOrigin.LEGACY_UNKNOWN, ImageOutcome.CacheHit(imageResource()).origin)
     }
 
     private class MemoryStore : ImageStore {

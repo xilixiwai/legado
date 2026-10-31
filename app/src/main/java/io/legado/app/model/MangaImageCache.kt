@@ -29,7 +29,7 @@ import kotlin.coroutines.coroutineContext
  *
  * 契约（与 UI 无关，可在 JVM 上直接测试）：
  * 1. 本地文件「存在且可解码」才算命中，命中不发任何网络请求；
- * 2. 本地文件不可用时**先删除**再下载，坏文件不会永久阻塞重试；
+ * 2. 本地候选不可用时尝试下载，下载或写入失败不得预先删除旧文件；
  * 3. 下载结果必须是有效图片（非空、可解码），否则**不写盘**；
  * 4. 写盘是原子的（临时文件 + rename），写后回读校验；
  * 5. 只有落盘且校验通过，才返回 [ImageCacheResult.STORED]。
@@ -115,10 +115,6 @@ class PersistentImageCache(
     private suspend fun ensureLocked(key: String): ImageCacheResult {
         //等锁期间可能已被别的协程写好
         if (store.isUsable(key)) return ImageCacheResult.HIT
-        //坏文件/半截文件必须先清掉，否则会永远挡住重试
-        if (store.exists(key)) {
-            store.delete(key)
-        }
         val bytes = try {
             fetch(key)
         } catch (e: CancellationException) {
@@ -136,10 +132,7 @@ class PersistentImageCache(
         val payload = optimizeOrOriginal(key, bytes)
         if (!store.writeAtomic(key, payload)) return ImageCacheResult.FAILED
         //写后回读：落盘的文件必须本身可用，才算缓存成功
-        if (!store.isUsable(key)) {
-            store.delete(key)
-            return ImageCacheResult.FAILED
-        }
+        if (!store.isUsable(key)) return ImageCacheResult.FAILED
         return ImageCacheResult.STORED
     }
 
@@ -378,7 +371,7 @@ object MangaImageContent {
     }
 
     /**
-     * 找出这张图**实际存在**的缓存文件名。
+     * 按候选顺序查找缓存文件名；调用方负责在 [exists] 中验证可读性与内容。
      *
      * 顺序：新后缀 → `.svg` → 旧版 URL 后缀 → 常见旧后缀。
      * 新旧文件共享同一个 `md5` 前缀，所以「换后缀」不会变成两份缓存；
@@ -390,7 +383,7 @@ object MangaImageContent {
         exists: (String) -> Boolean,
     ): String? {
         candidatesFor(baseName, urlSuffix).forEach { name ->
-            if (exists(name)) return name
+            if (runCatching { exists(name) }.getOrDefault(false)) return name
         }
         return null
     }

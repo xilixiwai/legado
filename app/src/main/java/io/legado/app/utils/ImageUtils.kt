@@ -1,5 +1,6 @@
 package io.legado.app.utils
 
+import com.script.ScriptBindings
 import io.legado.app.constant.AppLog
 import io.legado.app.data.entities.BaseSource
 import io.legado.app.data.entities.Book
@@ -20,19 +21,29 @@ object ImageUtils {
     fun decode(
         src: String, bytes: ByteArray, isCover: Boolean,
         source: BaseSource?, book: Book? = null
+    ): ByteArray? = decodeBytes(
+        src, bytes, isCover, source, book,
+        evaluate = { rule, bindings -> source?.evalJS(rule, bindings) },
+        onFailure = { AppLog.putDebug("${src}解密错误", it) },
+    )
+
+    /** 与正式入口共用规则选择、上下文及返回值检查；允许 JVM 测试使用真实 Rhino 而不初始化 Android 存储。 */
+    internal fun decodeBytes(
+        src: String, bytes: ByteArray, isCover: Boolean,
+        source: BaseSource?, book: Book?,
+        evaluate: (String, ScriptBindings.() -> Unit) -> Any?,
+        onFailure: (Throwable) -> Unit,
     ): ByteArray? {
         val ruleJs = getRuleJs(source, isCover)
         if (ruleJs.isNullOrBlank()) return bytes
         //解密库hutool.crypto ByteArray|InputStream -> ByteArray
         return kotlin.runCatching {
-            source?.evalJS(ruleJs) {
+            evaluate(ruleJs) {
                 put("book", book)
                 put("result", bytes)
                 put("src", src)
             } as ByteArray
-        }.onFailure {
-            AppLog.putDebug("${src}解密错误", it)
-        }.getOrNull()
+        }.onFailure(onFailure).getOrNull()
     }
 
     fun decode(
