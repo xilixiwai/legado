@@ -2,9 +2,11 @@ package io.legado.app.help
 
 import io.legado.app.utils.DiagSourceText.assertOrder
 import io.legado.app.utils.DiagSourceText.block
+import io.legado.app.utils.DiagSourceText.countOf
 import io.legado.app.utils.DiagSourceText.source
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -215,16 +217,126 @@ class MangaPerfLogTest {
         assertFalse("状态探测不得读文件内容", stateBlock.contains("readBytes"))
     }
 
+    // ---------- 行为：真实翻页判定（FlipTracker） ----------
+
     @Test
-    fun `翻页事件挂在绑定入口且关闭时只维护游标`() {
+    fun `首次位置记init且同位置重复不产生事件`() {
+        val tracker = MangaPerfLog.FlipTracker()
+        val first = tracker.onPageChange("book#0", 0)
+        assertEquals("init", first?.dir)
+        assertEquals(-1, first?.from)
+        assertEquals(0, first?.to)
+        //首屏布局稳定后重复回调同一中心位置（重绑/复扫）不得产生翻页事件
+        assertNull(tracker.onPageChange("book#0", 0))
+        assertNull(tracker.onPageChange("book#0", 0))
+    }
+
+    @Test
+    fun `同章快速连续翻页每次真实变化都有事件且方向起止正确`() {
+        val tracker = MangaPerfLog.FlipTracker()
+        tracker.onPageChange("book#0", 0)
+        listOf(
+            Triple("next", 0, 1),
+            Triple("next", 1, 2),
+            Triple("prev", 2, 1),
+            Triple("next", 1, 2),
+        ).forEach { (dir, from, to) ->
+            val event = tracker.onPageChange("book#0", to)
+            assertEquals("方向", dir, event?.dir)
+            assertEquals("from", from, event?.from)
+            assertEquals("to", to, event?.to)
+        }
+    }
+
+    @Test
+    fun `菜单跳页大跨度仍按真实页码方向与起止记录`() {
+        val tracker = MangaPerfLog.FlipTracker()
+        tracker.onPageChange("book#0", 2)
+        val jump = tracker.onPageChange("book#0", 17)
+        assertEquals("next", jump?.dir)
+        assertEquals(2, jump?.from)
+        assertEquals(17, jump?.to)
+        val back = tracker.onPageChange("book#0", 3)
+        assertEquals("prev", back?.dir)
+        assertEquals(17, back?.from)
+        assertEquals(3, back?.to)
+    }
+
+    @Test
+    fun `章节进入与换书记init且使用新章节页码`() {
+        val tracker = MangaPerfLog.FlipTracker()
+        tracker.onPageChange("book#0", 5)
+        //跨入下一章：dir=init，from 为上一章最后停留页码，to 为新章页码
+        val nextChapter = tracker.onPageChange("book#1", 0)
+        assertEquals("init", nextChapter?.dir)
+        assertEquals(5, nextChapter?.from)
+        assertEquals(0, nextChapter?.to)
+        tracker.onPageChange("book#1", 3)
+        val prevChapter = tracker.onPageChange("book#0", 4)
+        assertEquals("init", prevChapter?.dir)
+        //换书后即使章节序号相同也不得当作同章续接（bookUrl 参与章节键）
+        val otherBook = tracker.onPageChange("other#0", 0)
+        assertEquals("init", otherBook?.dir)
+    }
+
+    @Test
+    fun `章节占位行页码为负不产生事件且不污染翻页游标`() {
+        val tracker = MangaPerfLog.FlipTracker()
+        tracker.onPageChange("book#0", 2)
+        assertNull(tracker.onPageChange("book#0", -1))
+        val event = tracker.onPageChange("book#0", 3)
+        assertEquals("next", event?.dir)
+        assertEquals(2, event?.from)
+    }
+
+    // ---------- 结构：埋点存在且不改变业务顺序 ----------
+
+    @Test
+    fun `翻页事件挂在中心页位置变化回调且绑定入口不再埋点`() {
         val adapter = source("app/src/main/java/io/legado/app/ui/book/manga/recyclerview/MangaAdapter.kt")
-        val bindBlock = block(adapter, "override fun onBindViewHolder(", "private fun logFlip(")
-        assertOrder(bindBlock, "is PageViewHolder -> {", "logFlip(position)", "vh.onBind(")
-        val flipBlock = block(adapter, "private fun logFlip(", "\n}")
-        assertTrue(flipBlock.contains("if (!MangaPerfLog.enabled)"))
-        assertTrue(flipBlock.contains("lastFlipPosition = position"))
-        assertTrue("翻转行须含方向", flipBlock.contains("\"next\""))
-        assertTrue("翻转行须含章节标识", flipBlock.contains("MangaPerfLog.imgId(it)"))
+        //首绑、复用重绑、GapWorker 预取绑定、配置全量重绑都走 onBindViewHolder，一律不产生翻页
+        assertFalse("Adapter 不得再有绑定入口翻页埋点", adapter.contains("logFlip"))
+        assertFalse(adapter.contains("lastFlipPosition"))
+        assertFalse(adapter.contains("MangaPerfLog"))
+        val activity = source("app/src/main/java/io/legado/app/ui/book/manga/ReadMangaActivity.kt")
+        //唯一挂载点：setPreScrollListener（onScrolled 中心页变化去重后的回调）
+        val hook = block(activity, "setPreScrollListener {", "binding.webtoonFrame.run")
+        //钩子在章节切换分支之后：curMangaChapter 已同步交换，章节标识取最新值
+        assertOrder(
+            hook,
+            "is BaseMangaPage",
+            "moveToNextChapter()",
+            "is MangaPage",
+            "logRealFlip(item)",
+            "upSeekBar("
+        )
+        assertEquals("setPreScrollListener 只有一处挂载", 1, countOf(activity, "setPreScrollListener"))
+        val logFn = block(activity, "private fun logRealFlip(", "override fun onNewIntent")
+        assertTrue("记录日志关闭时零计算", logFn.contains("if (!MangaPerfLog.enabled) return"))
+        assertTrue(logFn.contains("flipTracker.onPageChange("))
+        assertTrue("章节标识读最新 curMangaChapter", logFn.contains("curMangaChapter?.chapter?.url"))
+        assertTrue("pre 状态零解码快照", logFn.contains("preloadStateOf("))
+        assertTrue("翻页事件须推进翻页 ID", logFn.contains("MangaPerfLog.nextFlipId()"))
+        assertTrue("翻转行须含方向", logFn.contains("event.dir"))
+    }
+
+    @Test
+    fun `首帧估算记账前重校验绑定身份且重绑回收移除监听`() {
+        val vh = source("app/src/main/java/io/legado/app/ui/book/manga/recyclerview/MangaVH.kt")
+        val readyBlock = block(vh, "private fun emitReady(", "private fun applyReadyLayout")
+        //顺序：触发即摘除自身 → 身份重校验（过期提前返回）→ 才允许记 MangaDraw
+        assertOrder(
+            readyBlock,
+            "removeOnPreDrawListener(this)",
+            "canDeliverToUi(sequence, imageUrl)",
+            "MangaPerfLog.draw("
+        )
+        assertTrue("监听引用必须登记以便摘除", readyBlock.contains("drawListener = listener"))
+        assertTrue(readyBlock.contains("addOnPreDrawListener(listener)"))
+        val loadBlock = block(vh, "fun loadImageWithRetry(", "fun cancelLoad()")
+        assertTrue("重绑必须移除旧首帧估算监听", loadBlock.contains("removeDrawListener()"))
+        val cancelBlock = block(vh, "fun cancelLoad()", "private fun removeDrawListener")
+        assertTrue("复用/回收必须移除首帧估算监听", cancelBlock.contains("removeDrawListener()"))
     }
 
     @Test

@@ -23,7 +23,6 @@ import io.legado.app.base.adapter.ItemViewHolder
 import io.legado.app.base.adapter.RecyclerAdapter.Companion.TYPE_FOOTER_VIEW
 import io.legado.app.databinding.ItemBookMangaEdgeBinding
 import io.legado.app.databinding.ItemBookMangaPageBinding
-import io.legado.app.help.MangaPerfLog
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.getBookSource
 import io.legado.app.model.ReadManga
@@ -37,9 +36,6 @@ import io.legado.app.utils.dpToPx
 
 class MangaAdapter(private val context: Context) :
     RecyclerView.Adapter<RecyclerView.ViewHolder>(), PreloadModelProvider<Any> {
-
-    //诊断翻页游标：上一次完成绑定的页面位置（-1 表示会话内尚未绑定）
-    private var lastFlipPosition = -1
 
     private val inflater: LayoutInflater = LayoutInflater.from(context)
     private lateinit var mConfig: MangaColorFilterConfig
@@ -204,45 +200,11 @@ class MangaAdapter(private val context: Context) :
     override fun onBindViewHolder(vh: RecyclerView.ViewHolder, position: Int) {
         when (vh) {
             is PageViewHolder -> {
-                logFlip(position)
                 vh.onBind(getItem(position) as MangaPage)
             }
             is PageMoreViewHolder -> vh.onBind(getItem(position) as ReaderLoading)
         }
     }
-
-    /**
-     * 翻页事件（诊断一级日志）：点击翻页、滑动、跳转等所有入口最终都汇聚到
-     * onBindViewHolder，在这里统一记录即可覆盖全部入口，且每次翻页独立成行。
-     * from 为上一次绑定的目标位置（近似「原页面」）；pre 为目标图预取/缓存状态
-     * 纯 stat 快照，零解码。诊断关闭时仅维护位置游标，不做其他计算。
-     */
-    private fun logFlip(position: Int) {
-        if (!MangaPerfLog.enabled) {
-            lastFlipPosition = position
-            return
-        }
-        val dir = when {
-            lastFlipPosition < 0 -> "init"
-            position > lastFlipPosition -> "next"
-            position < lastFlipPosition -> "prev"
-            else -> "same"
-        }
-        val item = getItems().getOrNull(position) as? MangaPage
-        val book = ReadManga.book
-        val preState = if (item != null && book != null) {
-            BookHelp.preloadStateOf(book, item.mImageUrl)
-        } else {
-            "none"
-        }
-        val chapterId = ReadManga.curMangaChapter?.chapter?.url?.let { MangaPerfLog.imgId(it) }
-            ?: "none"
-        MangaPerfLog.flip(
-            MangaPerfLog.nextFlipId(), dir, lastFlipPosition, position, chapterId, preState
-        )
-        lastFlipPosition = position
-    }
-
 
     private val footerItems: SparseArray<(parent: ViewGroup) -> ViewBinding> by lazy { SparseArray() }
 

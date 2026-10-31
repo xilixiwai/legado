@@ -30,6 +30,9 @@ object MangaPerfLog {
 
     private val flipCounter = AtomicLong(0)
 
+    /** 真实翻页判定器：进程级单例（见 [FlipTracker] 注释），仅诊断使用 */
+    val flipTracker = FlipTracker()
+
     /** 文件持久化总闸：复用现有「记录日志」开关；配置读取异常视为关闭 */
     val enabled: Boolean
         get() = runCatching { io.legado.app.help.config.AppConfig.recordLog }.getOrDefault(false)
@@ -93,6 +96,43 @@ object MangaPerfLog {
         runCatching {
             LogUtils.d(TAG, "MangaV ${message()}")
         }
+    }
+
+    /**
+     * 真实翻页判定（纯逻辑，JVM 可测）。
+     *
+     * 事件源是 WebtoonRecyclerView.onScrolled 的中心页位置变化（视图内部已按位置去重）：
+     * 点击翻页、滑动、音量键、自动滚动、菜单跳页、目录跳章与章节进入最终都汇聚到这一个回调；
+     * Adapter 绑定行为（首绑、复用重绑、GapWorker 预取绑定、配置变更全量重绑）不经过这里，
+     * 因此不再产生虚假翻页事件，也不会污染翻页游标。
+     *
+     * 章节进入（含首次打开与跨章/换书）记 dir=init；同章内按页码前后记 next/prev。
+     * 章节键由调用方用「书 + 章节序号」构造，换书同章号不会误判为同章。
+     */
+    class FlipTracker {
+        private var lastChapterKey: String? = null
+        private var lastPosition = -1
+
+        /** 位置未变化（或占位行页码 -1）返回 null；from 为上一真实页码（-1=会话首个位置） */
+        fun onPageChange(chapterKey: String, pageIndex: Int): Event? {
+            if (pageIndex < 0) return null
+            if (chapterKey != lastChapterKey) {
+                val event = Event("init", lastPosition, pageIndex)
+                lastChapterKey = chapterKey
+                lastPosition = pageIndex
+                return event
+            }
+            if (pageIndex == lastPosition) return null
+            val event = Event(
+                if (pageIndex > lastPosition) "next" else "prev",
+                lastPosition,
+                pageIndex
+            )
+            lastPosition = pageIndex
+            return event
+        }
+
+        data class Event(val dir: String, val from: Int, val to: Int)
     }
 
     /**

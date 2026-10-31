@@ -31,6 +31,8 @@ import io.legado.app.data.entities.BookProgress
 import io.legado.app.data.entities.BookSource
 import io.legado.app.databinding.ActivityMangaBinding
 import io.legado.app.databinding.ViewLoadMoreBinding
+import io.legado.app.help.MangaPerfLog
+import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.isImage
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.removeType
@@ -220,6 +222,7 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
                             ReadManga.curPageChanged()
                         }
                         if (item is MangaPage) {
+                            logRealFlip(item)
                             binding.mangaMenu.upSeekBar(item.index, item.imageCount)
                             upInfoBar(item)
                         }
@@ -240,6 +243,27 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
                 scrollToPrev()
             }
         }
+    }
+
+    /**
+     * 真实翻页诊断（一级 MangaFlip）：唯一事件源是中心页位置变化回调（preScrollListener），
+     * 点击翻页、滑动、音量键、自动滚动、菜单跳页、目录跳章与章节进入都汇聚于此；
+     * Adapter 绑定行为（首绑、复用重绑、GapWorker 预取、配置全量重绑）不产生翻页事件。
+     * 挂在章节切换分支之后：curMangaChapter 已完成同步交换，章节标识取最新值。
+     * 记录日志关闭时零计算直接返回；pre 为目标图预取/缓存状态，纯 stat 快照，零解码。
+     */
+    private fun logRealFlip(item: MangaPage) {
+        if (!MangaPerfLog.enabled) return
+        val book = ReadManga.book
+        val event = MangaPerfLog.flipTracker.onPageChange(
+            "${book?.bookUrl}#${item.chapterIndex}", item.index
+        ) ?: return
+        val chapterId = ReadManga.curMangaChapter?.chapter?.url?.let { MangaPerfLog.imgId(it) }
+            ?: "none"
+        val preState = if (book != null) BookHelp.preloadStateOf(book, item.mImageUrl) else "none"
+        MangaPerfLog.flip(
+            MangaPerfLog.nextFlipId(), event.dir, event.from, event.to, chapterId, preState
+        )
     }
 
     override fun onNewIntent(intent: Intent) {

@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.drawable.Drawable
 import android.view.Gravity
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -81,6 +82,9 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
     /** 递增序号，丢弃过期回调（同一个 VH 会被反复复用） */
     private var loadSequence = 0
 
+    /** 首帧估算用的一次性 OnPreDraw 监听（重绑/回收时移除，防止旧轨迹记到新页面的绘制帧） */
+    private var drawListener: ViewTreeObserver.OnPreDrawListener? = null
+
     fun initComponent(
         loading: ProgressBar,
         image: AppCompatImageView,
@@ -106,8 +110,10 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
             showFail()
             return
         }
-        //重绑先取消旧绑定任务：其结果已无 UI 归属
+        //重绑先取消旧绑定任务：其结果已无 UI 归属；一并移除旧的首帧估算监听，
+        //避免重绑后旧轨迹把新页面的绘制帧记成自己的 draw 估算
         loadJob?.cancel()
+        removeDrawListener()
         val sequence = ++loadSequence
         mImage.tag = imageUrl
         mFlProgress.isVisible = true
@@ -188,8 +194,17 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
     /** 复用/销毁时取消在途加载 */
     fun cancelLoad() {
         loadSequence++
+        removeDrawListener()
         loadJob?.cancel()
         loadJob = null
+    }
+
+    /** 移除未触发的首帧估算监听（幂等；监听自身触发时也会摘除并清引用） */
+    private fun removeDrawListener() {
+        drawListener?.let {
+            mImage.viewTreeObserver.removeOnPreDrawListener(it)
+        }
+        drawListener = null
     }
 
     /**
@@ -265,7 +280,7 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
                 val deliver = canDeliverToUi(sequence, imageUrl)
                 if (deliver) {
                     applyReadyLayout(isHorizontal, isLastImage)
-                    emitReady(trace, glideStart)
+                    emitReady(trace, glideStart, sequence, imageUrl)
                 } else {
                     trace?.cancel("stale")
                     MangaPerfLog.summary(trace)
@@ -338,7 +353,7 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
                     val deliver = canDeliverToUi(sequence, imageUrl)
                     if (deliver) {
                         applyReadyLayout(isHorizontal, isLastImage)
-                        emitReady(trace, glideStart)
+                        emitReady(trace, glideStart, sequence, imageUrl)
                     } else {
                         trace?.cancel("stale")
                         MangaPerfLog.summary(trace)
@@ -390,7 +405,7 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
                 if (deliver) {
                     if (trace != null) trace.out = "net"
                     applyReadyLayout(isHorizontal, isLastImage)
-                    emitReady(trace, glideStart)
+                    emitReady(trace, glideStart, sequence, imageUrl)
                 } else {
                     trace?.cancel("stale")
                     MangaPerfLog.summary(trace)
@@ -404,29 +419,39 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
      * 成功交付终端：记录 glide 段耗时并发汇总行（一次加载只发一条，含兜底链）；
      * 慢页（≥[MangaPerfLog.SLOW_THRESHOLD_MS]）或详细模式再发阶段明细，
      * 并登记 OnPreDraw 首帧估算（est，非真实上屏时刻）。
+     * 带上 [sequence]/[imageUrl]：preDraw 触发时重校验绑定身份，
+     * ViewHolder 已重绑或图片已过期时不得把新页面的绘制帧记给旧轨迹。
      */
-    private fun emitReady(trace: MangaPerfLog.Trace?, glideStart: Long) {
+    private fun emitReady(
+        trace: MangaPerfLog.Trace?,
+        glideStart: Long,
+        sequence: Int,
+        imageUrl: String,
+    ) {
         if (trace == null) return
         trace.glideMs = MangaPerfLog.msSince(glideStart)
         MangaPerfLog.summary(trace)
         if (trace.isSlow() || MangaPerfLog.verbose) {
             MangaPerfLog.detail(trace, if (trace.isSlow()) "slow" else "verbose")
             val readyNs = System.nanoTime()
-            //一次性 OnPreDraw：资源就绪到下一绘制帧的间隔（估算值，非真实上屏时刻）
-            mImage.viewTreeObserver.addOnPreDrawListener(
-                object : android.view.ViewTreeObserver.OnPreDrawListener {
-                    private var fired = false
-                    override fun onPreDraw(): Boolean {
-                        if (fired) return true
-                        fired = true
-                        mImage.viewTreeObserver.removeOnPreDrawListener(this)
-                        val drawMs = MangaPerfLog.msSince(readyNs)
-                        trace.drawMs = drawMs
-                        MangaPerfLog.draw(trace.img, trace.flipId, drawMs)
-                        return true
-                    }
+            //一次性 OnPreDraw：资源就绪到下一绘制帧的间隔（估算值，非真实上屏时刻）。
+            //触发即摘除；记账前重校验绑定身份（序号 + tag），过期一律不记、静默返回
+            val listener = object : ViewTreeObserver.OnPreDrawListener {
+                private var fired = false
+                override fun onPreDraw(): Boolean {
+                    if (fired) return true
+                    fired = true
+                    mImage.viewTreeObserver.removeOnPreDrawListener(this)
+                    if (drawListener === this) drawListener = null
+                    if (!canDeliverToUi(sequence, imageUrl)) return true
+                    val drawMs = MangaPerfLog.msSince(readyNs)
+                    trace.drawMs = drawMs
+                    MangaPerfLog.draw(trace.img, trace.flipId, drawMs)
+                    return true
                 }
-            )
+            }
+            drawListener = listener
+            mImage.viewTreeObserver.addOnPreDrawListener(listener)
         }
     }
 
