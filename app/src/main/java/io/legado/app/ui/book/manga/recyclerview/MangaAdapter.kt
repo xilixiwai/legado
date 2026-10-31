@@ -1,5 +1,6 @@
 package io.legado.app.ui.book.manga.recyclerview
 
+import android.app.Activity
 import android.content.Context
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
@@ -186,7 +187,12 @@ class MangaAdapter(private val context: Context) :
                 }
                 //先取消在途的图片落盘任务，再清 Glide 请求，避免复用后旧回调写错 View
                 vh.cancelLoad()
-                Glide.with(context).clear(vh.binding.image)
+                //宿主已销毁/退出时不能再经 Glide.with(activity) 取 RequestManager
+                //（销毁后 RequestManager 已随生命周期自行清空该页请求）
+                val activity = context as? Activity
+                if (activity == null || (!activity.isDestroyed && !activity.isFinishing)) {
+                    Glide.with(context).clear(vh.binding.image)
+                }
             }
         }
     }
@@ -236,9 +242,10 @@ class MangaAdapter(private val context: Context) :
     override fun getPreloadRequestBuilder(item: Any): RequestBuilder<*>? {
         if (item is MangaPage) {
             val book = ReadManga.book ?: return null
-            //预下载：真正落盘（与阅读、整本下载同一个统一入口），不再只预热 Glide 临时缓存。
-            //命中本地时这里什么都不做，避免重复下载。
-            if (!BookHelp.isImageUsable(book, item.mImageUrl)) {
+            //预加载器回调在主线程：这里只做候选存在性探测（纯 stat，零解码、零同步读文件内容），
+            //完整校验与落盘交给 prefetchImage 的 IO 协程（命中不联网）。
+            //探测为真但文件损坏时不预下载：由阅读绑定的统一入口失败回退自愈。
+            if (!BookHelp.hasImageFile(book, item.mImageUrl)) {
                 BookHelp.prefetchImage(
                     ReadManga.bookSource ?: book.getBookSource(),
                     book,

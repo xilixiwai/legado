@@ -221,19 +221,22 @@ class MangaCacheStructureTest {
         val loadBlock = DiagSourceText.block(src, "fun loadImageWithRetry(", "fun cancelLoad()")
         DiagSourceText.assertOrder(
             loadBlock,
-            "BookHelp.ensureImage(source, book, imageUrl, chapter, onImageData = { imageData = it })",
+            "BookHelp.ensureImage(",
+            "onHitFile = { hitFile = it }",
             "if (result != ImageCacheResult.FAILED)",
-            "loadFromCache(imageUrl",
+            "loadFromCache(",
             "else if (bytes != null)",
-            "loadFromBytes(imageUrl"
+            "loadFromBytes("
         )
+        //命中后不再有第二次解析/校验：localImageFile 已删除，阅读页不得再调 isImageUsable
+        assertFalse("命中路径不得重复校验", src.contains("isImageUsable("))
         //结构检查只验证接线，不替代Android/Glide实际显示测试。
         val memoryBlock = DiagSourceText.block(src, "private fun loadFromBytes(", "private fun loadFromCache(")
         assertTrue(memoryBlock, memoryBlock.contains("ImageLoader.load(context, bytes)"))
         assertTrue(memoryBlock, memoryBlock.contains("DiskCacheStrategy.NONE"))
         assertTrue(memoryBlock, memoryBlock.contains("skipMemoryCache(true)"))
         assertTrue(memoryBlock, memoryBlock.contains("builder.transform(transformation)"))
-        assertTrue(memoryBlock, memoryBlock.contains("sequence != loadSequence || mImage.tag != imageUrl"))
+        assertTrue(memoryBlock, memoryBlock.contains("canDeliverToUi(sequence, imageUrl)"))
         assertFalse("内存回退不能再次请求网络", memoryBlock.contains("loadNetworkFallback("))
         assertFalse("内存回退不能删除旧缓存", memoryBlock.contains(".delete()"))
         val loader = DiagSourceText.source("app/src/main/java/io/legado/app/help/glide/ImageLoader.kt")
@@ -243,12 +246,13 @@ class MangaCacheStructureTest {
         val cacheBlock = DiagSourceText.block(src, "private fun loadFromCache(", "private fun loadNetworkFallback(")
         assertTrue(cacheBlock, cacheBlock.contains("BookCover.loadMangaLocal(context, file, transformation)"))
         assertFalse("本地显示路径不能直接走网络", cacheBlock.contains("BookCover.loadManga("))
-        //本地文件被删掉后还有一次网络兜底
+        //命中文件来自统一入口交接；仅在快路径未交接时单次解析兜底
+        assertTrue(cacheBlock, cacheBlock.contains("hitFile ?: run"))
+        assertTrue(cacheBlock, cacheBlock.contains("BookHelp.getValidatedImageFile(book, imageUrl)"))
+        //本地文件被删掉后还有一次网络兜底；兜底经主队列投递，不在监听器回调里直接重入
         assertTrue(cacheBlock, cacheBlock.contains("file.delete()"))
         assertTrue(cacheBlock, cacheBlock.contains("loadNetworkFallback("))
-        //命中判定要求可解码
-        val localBlock = DiagSourceText.block(src, "private fun localImageFile(", "\n}")
-        assertTrue(localBlock, localBlock.contains("BookHelp.isImageUsable(book, imageUrl)"))
+        assertTrue(cacheBlock, cacheBlock.contains("mImage.post"))
         //Glide 的临时缓存不能作为持久化手段
         val coverSrc = DiagSourceText.source("app/src/main/java/io/legado/app/model/BookCover.kt")
         val localLoader = DiagSourceText.block(coverSrc, "fun loadMangaLocal(", "fun preloadManga(")
@@ -256,6 +260,41 @@ class MangaCacheStructureTest {
         //非图片后缀的文件必须按内容解码：Glide 的 File 模型走 BitmapFactory，不看文件名
         assertTrue(localLoader, localLoader.contains(".load(file)"))
         assertFalse("不能按路径字符串/扩展名分发", localLoader.contains(".load(file.absolutePath)"))
+    }
+
+    @Test
+    fun `命中路径单次校验并交接文件`() {
+        val bookHelp = DiagSourceText.source(bookHelpPath)
+        //ensureImage 的命中快路径：先单次解析交接文件，未命中才进入统一入口
+        val ensureBlock = DiagSourceText.block(
+            bookHelp, "suspend fun ensureImage(", "private fun imageCache("
+        )
+        DiagSourceText.assertOrder(
+            ensureBlock,
+            "if (onHitFile != null)",
+            "getValidatedImageFile(book, src)?.let",
+            "return ImageCacheResult.HIT",
+            "imageCache(bookSource, book, chapter).ensure(src, onImageData)"
+        )
+        //单次解析：候选与旧命名兜底在同一次遍历里完成校验（损坏候选不阻断有效候选）
+        val resolverBlock = DiagSourceText.block(
+            bookHelp, "fun getValidatedImageFile(", "fun hasImageFile("
+        )
+        assertTrue(resolverBlock, resolverBlock.contains("MangaImageContent.firstValidImageFile("))
+        assertTrue(resolverBlock, resolverBlock.contains("isImageFileValid(file)"))
+        //isImageUsable 漫画分支复用同一单次解析，小说路径保持原行为
+        val usableBlock = DiagSourceText.block(
+            bookHelp, "fun isImageUsable(", "fun isImageFileValid("
+        )
+        assertTrue(usableBlock, usableBlock.contains("getValidatedImageFile(book, src) != null"))
+        assertTrue(usableBlock, usableBlock.contains("isImageFileValid(getImage(book, src))"))
+        //预加载探测只做存在性 stat，不得包含任何解码调用
+        val probeBlock = DiagSourceText.block(
+            bookHelp, "fun hasImageFile(", "    /**\n     * 原子写"
+        )
+        assertTrue(probeBlock, probeBlock.contains("resolveExistingCacheName("))
+        assertFalse("主线程探测不得解码", probeBlock.contains("decodeFile"))
+        assertFalse("主线程探测不得解码", probeBlock.contains("BitmapFactory"))
     }
 
     @Test
@@ -323,9 +362,16 @@ class MangaCacheStructureTest {
     fun `阅读页在复用时取消在途加载`() {
         val src = DiagSourceText.source(mangaVhPath)
         assertTrue(src, src.contains("fun cancelLoad()"))
-        assertTrue(src, src.contains("cancelChildren()"))
+        //重绑与复用都取消在途任务，不再使用 cancelChildren 群发取消
+        assertTrue(src, src.contains("loadJob?.cancel()"))
+        assertFalse(src, src.contains("cancelChildren()"))
+        //回主线程的 UI/Glide 操作统一过生命周期守卫
+        assertTrue(src, src.contains("private fun canDeliverToUi("))
+        assertTrue(src, src.contains("!activity.isDestroyed && !activity.isFinishing"))
         val adapter = DiagSourceText.source(mangaAdapterPath)
         assertTrue(adapter, adapter.contains("vh.cancelLoad()"))
+        //宿主销毁后不能再经 Glide.with(activity) 取 RequestManager 清请求
+        assertTrue(adapter, adapter.contains("activity.isDestroyed && !activity.isFinishing"))
     }
 
     @Test

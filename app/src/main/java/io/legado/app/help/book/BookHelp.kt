@@ -459,8 +459,14 @@ object BookHelp {
      * 只看 `exists()` 会把「403 页面」「验证页 HTML」「0 字节半截文件」当成已缓存，
      * 于是既不重下也显示不出来。命中判定、跳过判定、清理判定统一以本方法为准。
      * 判定依据是**文件内容**（`BitmapFactory` 按 magic bytes 识别），与扩展名无关。
+     *
+     * 漫画书走 [getValidatedImageFile] 的单次「解析 + 校验」（一次遍历同时得到命中文件与可用性），
+     * 不再像旧实现那样先 `getImage` 解析一遍、再对结果完整校验一遍；小说路径保持原行为。
      */
-    fun isImageUsable(book: Book, src: String): Boolean = isImageFileValid(getImage(book, src))
+    fun isImageUsable(book: Book, src: String): Boolean {
+        if (book.isImage) return getValidatedImageFile(book, src) != null
+        return isImageFileValid(getImage(book, src))
+    }
 
     fun isImageFileValid(file: File): Boolean {
         if (!file.exists() || file.length() <= 0) return false
@@ -483,6 +489,41 @@ object BookHelp {
                 SvgUtils.getSize(file.absolutePath) != null
             }
         }.getOrDefault(false)
+    }
+
+    /**
+     * 漫画候选的**单次**「解析 + 完整校验」：返回首个通过校验的候选文件（含旧命名兜底），
+     * 无可用文件返回 null。
+     *
+     * 供命中判定（[isImageUsable]）与命中文件交接（[ensureImage] 的 `onHitFile`）共用：
+     * 一次遍历同时确定「哪个文件命中」与「是否可解码」，调用方拿到文件即可直接上屏，
+     * 不必再解析、再校验一遍。校验强度与 [isImageFileValid] 完全一致，
+     * 损坏的 `.mcache` 不会被采用，也不会阻断后面的有效旧候选。
+     */
+    fun getValidatedImageFile(book: Book, src: String): File? {
+        if (!book.isImage) return null
+        val dir = imageDir(book)
+        return MangaImageContent.firstValidImageFile(
+            dir = dir,
+            baseName = MangaImageKeys.baseName(src),
+            urlSuffix = getImageSuffix(src),
+            legacyName = MangaImageKeys.legacyImageFileName(src),
+        ) { file -> isImageFileValid(file) }
+    }
+
+    /**
+     * 候选存在性探测：只做 stat，**不做任何解码**，供主线程（预加载器回调）判定是否需要预下载。
+     * 完整的「可解码」校验仍以 [isImageUsable] / [getValidatedImageFile] 为准；
+     * 探测为真但文件实际损坏时，由阅读绑定与统一入口既有的失败回退自愈。
+     */
+    fun hasImageFile(book: Book, src: String): Boolean {
+        val dir = imageDir(book)
+        val base = MangaImageKeys.baseName(src)
+        return MangaImageContent.resolveExistingCacheName(
+            baseName = base,
+            urlSuffix = getImageSuffix(src),
+            exists = { name -> File(dir, name).exists() },
+        ) != null
     }
 
     /**
@@ -662,6 +703,10 @@ object BookHelp {
      * 契约见 [PersistentImageCache]：本地可用即命中且不联网，失败保留旧候选；
      * 只有「有效图片 + 原子写入 + 回读校验」全部通过才返回
      * [ImageCacheResult.STORED]/[ImageCacheResult.HIT]，否则 [ImageCacheResult.FAILED]。
+     *
+     * @param onHitFile 命中时交接**已通过完整校验**的缓存文件，阅读页直接上屏，
+     * 不再重复解析与校验。仅漫画书生效；未命中（含并发下载中的等待）不回调，
+     * 返回 HIT/STORED 而未回调时由调用方自行单次解析兜底。
      */
     suspend fun ensureImage(
         bookSource: BookSource?,
@@ -669,8 +714,18 @@ object BookHelp {
         src: String,
         chapter: BookChapter? = null,
         onImageData: ((ByteArray) -> Unit)? = null,
+        onHitFile: ((File) -> Unit)? = null,
     ): ImageCacheResult {
         if (src.isBlank()) return ImageCacheResult.FAILED
+        //命中快路径：单次解析即完成校验与文件交接，不必进入互斥入口再校验一遍；
+        //未命中才走统一入口（下载/写入语义完全不变）。并发场景不会重复下载：
+        //这里只做只读解析，真正的下载仍由 ensure 内的互斥与锁下去重保证。
+        if (onHitFile != null) {
+            getValidatedImageFile(book, src)?.let {
+                onHitFile(it)
+                return ImageCacheResult.HIT
+            }
+        }
         return imageCache(bookSource, book, chapter).ensure(src, onImageData)
     }
 

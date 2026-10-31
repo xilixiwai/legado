@@ -13,6 +13,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicIntegerArray
@@ -409,6 +410,29 @@ object MangaImageContent {
         }
         listOf("jpg", "jpeg", "png", "webp", "gif", "bmp").forEach { names.add("$baseName.$it") }
         return names.toList()
+    }
+
+    /**
+     * 单次「解析 + 校验」：按候选顺序返回第一个通过 [validate] 的缓存文件；
+     * 全部候选无效时再校验旧命名（legacy）兜底文件，仍无效返回 null。
+     *
+     * 命中判定与命中文件交接共用同一次遍历：一次就同时得到「哪个文件命中」和「是否可用」，
+     * 消除「先解析一遍、再对结果完整校验一遍」的重复读取与重复解码。
+     * 校验强度完全由 [validate] 决定，损坏候选不会被采用，也不会阻断后续有效候选。
+     */
+    fun firstValidImageFile(
+        dir: File,
+        baseName: String,
+        urlSuffix: String,
+        legacyName: String,
+        validate: (File) -> Boolean,
+    ): File? {
+        candidatesFor(baseName, urlSuffix).forEach { name ->
+            val file = File(dir, name)
+            if (runCatching { validate(file) }.getOrDefault(false)) return file
+        }
+        val legacy = File(dir, legacyName)
+        return if (runCatching { validate(legacy) }.getOrDefault(false)) legacy else null
     }
 
     private fun startsWith(bytes: ByteArray, prefix: ByteArray): Boolean {
