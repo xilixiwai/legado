@@ -681,6 +681,7 @@ object BookHelp {
      * @param retryEach 单张图片失败后的重试次数（不含首次）
      * @param onTotal 图片地址解析完成后的总数（章节进度分母）
      * @param onProgress 已处理张数（成功、跳过、失败都算已处理）
+     * @param onResult 每张图片重试结束后的最终结果；可能由不同工作协程调用
      */
     suspend fun ensureChapterImages(
         bookSource: BookSource?,
@@ -691,6 +692,7 @@ object BookHelp {
         retryEach: Int = 0,
         onTotal: (Int) -> Unit = {},
         onProgress: (Int) -> Unit = {},
+        onResult: (ImageCacheResult) -> Unit = {},
     ): ImageBatchStats {
         val urls = chapterImageUrls(chapter, content)
         onTotal(urls.size)
@@ -700,6 +702,7 @@ object BookHelp {
             urls = urls,
             concurrency = concurrency,
             onProgress = onProgress,
+            onResult = onResult,
             ensure = { url -> ensureWithRetry(cache, url, retryEach) },
         )
     }

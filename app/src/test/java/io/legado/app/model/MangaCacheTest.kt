@@ -11,12 +11,11 @@ import org.junit.Test
 /**
  * 整本漫画下载的纯逻辑回归测试。
  *
- * 覆盖：章节范围归一化、进度百分比不倒退、通知文案、单张图片的重试策略。
+ * 覆盖：章节范围归一化、图片进度换算、通知文案、单张图片的重试策略。
  * 这些都不依赖 Android / 数据库 / 网络，可以直接在 JVM 上跑。
  *
- * 需要网络与真实缓存目录的部分（跳过已缓存图片、失败计数落到任务状态、
- * 取消后不再调度新请求、阅读页命中本地文件）见 [MangaCacheStructureTest]
- * 的结构断言与报告中的真机验收清单。
+ * 任务累计、取消和隔离目录落盘行为另见 [MangaCacheTaskProgressTest]；
+ * Android 通知实际渲染仍需真机验收。
  */
 class MangaCacheTest {
 
@@ -31,12 +30,20 @@ class MangaCacheTest {
         failedImages: Int = 0,
         failedChapters: Int = 0,
         running: Boolean = true,
+        discovered: Int = 0,
+        cached: Int = 0,
+        stored: Int = 0,
+        totalKnown: Boolean = false,
     ) = MangaCacheProgress(
         bookName = "测试漫画",
         doneChapters = done,
         totalChapters = total,
         curChapterDone = curDone,
         curChapterTotal = curTotal,
+        discoveredImages = discovered,
+        cachedImages = cached,
+        storedImages = stored,
+        totalImagesKnown = totalKnown,
         failedImages = failedImages,
         failedChapters = failedChapters,
         running = running,
@@ -100,11 +107,11 @@ class MangaCacheTest {
     // ---------- 3. 进度百分比 ----------
 
     @Test
-    fun `整体进度百分比单调不减`() {
+    fun `总图片数确定后按图片处理数单调推进`() {
         val total = 480
         var last = -1
         for (done in 0..total) {
-            val percent = progress(done, total).percent
+            val percent = progress(0, 2, discovered = total, stored = done, totalKnown = true).percent
             assertTrue("done=$done 的百分比 $percent 小于前一次 $last", percent >= last)
             last = percent
         }
@@ -114,8 +121,8 @@ class MangaCacheTest {
     @Test
     fun `百分比被限制在 0 到 100`() {
         assertEquals(0, progress(0, 0).percent)
-        assertEquals(0, progress(-1, 100).percent)
-        assertEquals(100, progress(999, 100).percent)
+        assertEquals(0, progress(0, 2, discovered = 100, stored = -1, totalKnown = true).percent)
+        assertEquals(100, progress(0, 2, discovered = 100, stored = 999, totalKnown = true).percent)
     }
 
     // ---------- 4. 通知文案 ----------
@@ -138,10 +145,12 @@ class MangaCacheTest {
 
     @Test
     fun `通知文案包含漫画名 章节 图片与失败数`() {
-        val text = progress(12, 480, curDone = 8, curTotal = 24, failedImages = 3).text
+        val text = progress(12, 480, discovered = 24, cached = 2, stored = 3, failedImages = 3).text
         assertTrue(text, text.contains("测试漫画"))
         assertTrue(text, text.contains("13/480"))
         assertTrue(text, text.contains("8/24"))
+        assertTrue(text, text.contains("成功 5"))
+        assertTrue(text, text.contains("命中 2，新增 3"))
         assertTrue(text, text.contains("失败 3"))
         //章节级失败只在出现时追加
         assertFalse(text, text.contains("章节失败"))
@@ -154,10 +163,11 @@ class MangaCacheTest {
     }
 
     @Test
-    fun `文案不展示未预扫描的总图片数`() {
-        //全书图片总数在下载前不可知，不能当成精确值展示
-        val text = progress(12, 480, curDone = 8, curTotal = 24).text
-        assertFalse(text, text.contains("总图片"))
+    fun `尚未解析全部章节时明确标记已发现而非最终总数`() {
+        val p = progress(12, 480, discovered = 24, stored = 24)
+        assertTrue(p.indeterminate)
+        assertEquals(0, p.percent)
+        assertTrue(p.text, p.text.contains("已发现，总数待定"))
     }
 
     // ---------- 5. 单张图片重试 ----------

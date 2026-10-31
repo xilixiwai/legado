@@ -23,7 +23,6 @@ class MangaCacheStructureTest {
 
     private val mangaCachePath = "app/src/main/java/io/legado/app/model/MangaCache.kt"
     private val imageCachePath = "app/src/main/java/io/legado/app/model/MangaImageCache.kt"
-    private val progressPath = "app/src/main/java/io/legado/app/model/MangaCacheProgress.kt"
     private val servicePath = "app/src/main/java/io/legado/app/service/MangaCacheService.kt"
     private val mangaVhPath =
         "app/src/main/java/io/legado/app/ui/book/manga/recyclerview/MangaVH.kt"
@@ -123,8 +122,8 @@ class MangaCacheStructureTest {
         DiagSourceText.assertOrder(
             src,
             "for (index in startIndex..endIndex)",
-            "downloadChapter(index)",
-            "doneChapters.incrementAndGet()"
+            "download(index,",
+            "doneChapters++"
         )
         //章节级只解析一次：不把全书图片一次性收集
         assertEquals(1, DiagSourceText.countOf(src, "BookHelp.ensureChapterImages("))
@@ -132,20 +131,13 @@ class MangaCacheStructureTest {
     }
 
     @Test
-    fun `下载全部以图片为处理单位统计`() {
+    fun `下载全部接收每张图片的最终结果`() {
         val src = DiagSourceText.source(mangaCachePath)
-        DiagSourceText.assertOrder(
-            src,
-            "BookHelp.ensureChapterImages(",
-            "processedImages.addAndGet(stats.done)",
-            "skippedImages.addAndGet(stats.hit)",
-            "successImages.addAndGet(stats.stored)",
-            "failedImages.addAndGet(stats.failed)"
-        )
+        assertTrue(src, src.contains("onResult = onResult"))
         //正文有但没有图片，不能算「这一章下完了」
-        assertTrue(src, src.contains("emptyChapters.incrementAndGet()"))
-        //卷节点单独计数，不污染失败统计
-        assertTrue(src, src.contains("volumeChapters.incrementAndGet()"))
+        assertTrue(src, src.contains("emptyChapters++"))
+        //卷节点按已知零图片跳过，不污染失败统计
+        assertTrue(src, src.contains("if (chapter.isVolume) {\n            onTotal(0)"))
         //单张失败重试次数有上限
         assertTrue(src, src.contains("retryEach = MangaCache.MAX_RETRY"))
     }
@@ -154,13 +146,12 @@ class MangaCacheStructureTest {
     fun `完整缓存标记只在整本且全部图片验证通过时生成`() {
         val src = DiagSourceText.source(mangaCachePath)
         val runBlock = DiagSourceText.block(src, "private suspend fun run()", "private suspend fun downloadChapter")
-        assertTrue("一张图都没处理到不能算成功", runBlock.contains("processedImages.get() <= 0 -> State.ALL_FAILED"))
-        assertTrue("无图章节不能算成功", runBlock.contains("emptyChapters.get() == 0"))
-        assertTrue("失败图片不能算成功", runBlock.contains("failedImages.get() == 0"))
-        assertTrue("失败章节不能算成功", runBlock.contains("failedChapters.get() == 0"))
+        assertTrue("没有成功图片不能算成功", runBlock.contains("cachedImages + storedImages == 0 -> State.ALL_FAILED"))
+        assertTrue("无图章节不能算成功", runBlock.contains("emptyChapters == 0"))
+        assertTrue("失败图片不能算成功", runBlock.contains("failedImages == 0"))
+        assertTrue("失败章节不能算成功", runBlock.contains("failedChapters == 0"))
         DiagSourceText.assertOrder(
             runBlock,
-            "state = when {",
             "if (state == State.SUCCESS && isWholeBook)",
             "BookHelp.markMangaFullCached(book)"
         )
@@ -222,14 +213,6 @@ class MangaCacheStructureTest {
         val src = DiagSourceText.source(mangaCachePath)
         assertTrue(src, src.contains("if (tasks.isNotEmpty()) return false"))
         assertTrue(src, src.contains("putIfAbsent"))
-    }
-
-    @Test
-    fun `进度百分比只用已完成章节数`() {
-        val src = DiagSourceText.source(progressPath)
-        assertTrue(src, src.contains("doneChapters.toLong() * 100L / totalChapters"))
-        //分母固定，不会因动态总数而倒退
-        assertFalse(src, src.contains("totalImages"))
     }
 
     @Test

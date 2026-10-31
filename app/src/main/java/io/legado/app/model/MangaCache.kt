@@ -24,7 +24,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 整本漫画下载任务。
@@ -104,10 +103,11 @@ object MangaCache {
     fun progress(): MangaCacheProgress? = tasks.values.firstOrNull()?.snapshot()
 
     internal fun onTaskFinish(task: MangaCacheTask) {
+        //先发布最终统计，服务观察到任务移除时即可读取完整结果。
+        lastFinishText = task.finishText()
         if (tasks[task.book.bookUrl] === task) {
             tasks.remove(task.book.bookUrl)
         }
-        lastFinishText = task.finishText()
         postEvent(EventBus.UP_DOWNLOAD, task.book.bookUrl)
     }
 
@@ -130,22 +130,20 @@ internal class MangaCacheTask(
     /** 只有覆盖了整本（第 0 章到最后一章）才算「整本已缓存」 */
     private val isWholeBook = startIndex == 0 && endIndex == chapterCount - 1
 
-    private val doneChapters = AtomicInteger(0)
-    private val curImageDone = AtomicInteger(0)
-    private val curImageTotal = AtomicInteger(0)
-    private val successImages = AtomicInteger(0)
-    private val skippedImages = AtomicInteger(0)
-    private val failedImages = AtomicInteger(0)
-    private val failedChapters = AtomicInteger(0)
-
-    /** 本次真正处理过的图片数（成功 + 跳过 + 失败），用于区分「一章都没有图」与「真的下完了」 */
-    private val processedImages = AtomicInteger(0)
+    /** 四路图片结果与通知快照使用同一把短锁，避免读取到相互矛盾的计数。 */
+    private val progressLock = Any()
+    private var doneChapters = 0
+    private var discoveredChapters = 0
+    private var discoveredImages = 0
+    private var curImageDone = 0
+    private var curImageTotal = 0
+    private var storedImages = 0
+    private var cachedImages = 0
+    private var failedImages = 0
+    private var failedChapters = 0
 
     /** 正文拿到了但解析不出任何图片的章节数（多半是正文规则失效/懒加载占位） */
-    private val emptyChapters = AtomicInteger(0)
-
-    /** 卷节点：本身不含图片，跳过且不计入失败 */
-    private val volumeChapters = AtomicInteger(0)
+    private var emptyChapters = 0
 
     @Volatile
     var state = State.RUNNING
@@ -158,24 +156,32 @@ internal class MangaCacheTask(
     }
 
     fun cancel() {
-        if (state == State.RUNNING) {
-            state = State.CANCELED
+        synchronized(progressLock) {
+            if (state == State.RUNNING) {
+                state = State.CANCELED
+            }
         }
         job?.cancel()
     }
 
-    fun snapshot(): MangaCacheProgress = MangaCacheProgress(
-        bookName = book.name,
-        doneChapters = doneChapters.get(),
-        totalChapters = totalChapters,
-        curChapterDone = curImageDone.get(),
-        curChapterTotal = curImageTotal.get(),
-        failedImages = failedImages.get(),
-        failedChapters = failedChapters.get(),
-        running = state == State.RUNNING,
-    )
+    fun snapshot(): MangaCacheProgress = synchronized(progressLock) {
+        MangaCacheProgress(
+            bookName = book.name,
+            doneChapters = doneChapters,
+            totalChapters = totalChapters,
+            curChapterDone = curImageDone,
+            curChapterTotal = curImageTotal,
+            discoveredImages = discoveredImages,
+            cachedImages = cachedImages,
+            storedImages = storedImages,
+            totalImagesKnown = discoveredChapters == totalChapters,
+            failedImages = failedImages,
+            failedChapters = failedChapters,
+            running = state == State.RUNNING,
+        )
+    }
 
-    fun finishText(): String {
+    fun finishText(): String = synchronized(progressLock) {
         val stateText = when (state) {
             State.SUCCESS -> "下载完成"
             State.PARTIAL_FAILED -> "部分失败"
@@ -183,48 +189,27 @@ internal class MangaCacheTask(
             State.CANCELED -> "已取消"
             State.RUNNING -> "已结束"
         }
-        return buildString {
-            append('《').append(book.name).append("》 ").append(stateText)
-            append(" · ").append(doneChapters.get()).append('/').append(totalChapters).append(" 章")
-            append(" · 已处理 ").append(successImages.get() + skippedImages.get()).append(" 张")
-            append(" · 失败 ").append(failedImages.get()).append(" 张")
-            if (failedChapters.get() > 0) {
-                append(" · 章节失败 ").append(failedChapters.get())
-            }
-            if (emptyChapters.get() > 0) {
-                append(" · 无图章节 ").append(emptyChapters.get())
+        buildString {
+            append(stateText).append(" · ").append(snapshot().text)
+            if (emptyChapters > 0) {
+                append(" · 无图章节 ").append(emptyChapters)
             }
         }
     }
 
     private suspend fun run() {
         try {
-            for (index in startIndex..endIndex) {
-                currentCoroutineContext().ensureActive()
-                if (state != State.RUNNING) break
-                downloadChapter(index)
-                doneChapters.incrementAndGet()
-                postEvent(EventBus.UP_DOWNLOAD, book.bookUrl)
-            }
-            if (state == State.RUNNING) {
-                state = when {
-                    //一张图都没处理到，不能报成功（例如整本书都成了卷节点、正文规则失效）
-                    processedImages.get() <= 0 -> State.ALL_FAILED
-                    failedImages.get() == 0 && failedChapters.get() == 0 &&
-                            emptyChapters.get() == 0 -> State.SUCCESS
-                    else -> State.PARTIAL_FAILED
-                }
-                //完整标记只能由「整本范围 + 全部图片已验证」产生
-                if (state == State.SUCCESS && isWholeBook) {
-                    BookHelp.markMangaFullCached(book)
-                }
+            processChapters()
+            //完整标记只能由「整本范围 + 全部图片已验证」产生
+            if (state == State.SUCCESS && isWholeBook) {
+                BookHelp.markMangaFullCached(book)
             }
         } catch (e: CancellationException) {
             state = State.CANCELED
             throw e
         } catch (e: Throwable) {
             if (state == State.RUNNING) {
-                state = State.PARTIAL_FAILED
+                state = if (snapshot().successImages == 0) State.ALL_FAILED else State.PARTIAL_FAILED
             }
             AppLog.put("《${book.name}》整本漫画下载中断\n${e.localizedMessage}", e)
         } finally {
@@ -235,6 +220,71 @@ internal class MangaCacheTask(
         }
     }
 
+    /** 逐章执行与统计；IO 和通知回调可替换，以行为测试覆盖真实任务状态流转。 */
+    internal suspend fun processChapters(
+        download: suspend (Int, (Int) -> Unit, (ImageCacheResult) -> Unit) -> Unit = ::downloadChapter,
+        onChapterDone: () -> Unit = { postEvent(EventBus.UP_DOWNLOAD, book.bookUrl) },
+        onChapterError: (Int, Exception) -> Unit = { index, error ->
+            AppLog.put("《${book.name}》第${index + 1}章处理失败\n${error.localizedMessage}", error)
+        },
+    ) {
+        try {
+            for (index in startIndex..endIndex) {
+                currentCoroutineContext().ensureActive()
+                if (state != State.RUNNING) break
+                synchronized(progressLock) {
+                    curImageDone = 0
+                    curImageTotal = 0
+                }
+                var discovered = false
+                var chapterFailed = false
+                try {
+                    download(index, { total ->
+                        synchronized(progressLock) {
+                            discovered = true
+                            discoveredChapters++
+                            discoveredImages += total
+                            curImageTotal = total
+                        }
+                    }, { result ->
+                        synchronized(progressLock) {
+                            when (result) {
+                                ImageCacheResult.HIT -> cachedImages++
+                                ImageCacheResult.STORED -> storedImages++
+                                ImageCacheResult.FAILED -> failedImages++
+                            }
+                            curImageDone++
+                        }
+                    })
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    //已经发现的图片及已完成结果保留；章节处理异常单独统计。
+                    synchronized(progressLock) { failedChapters++ }
+                    chapterFailed = true
+                    onChapterError(index, e)
+                }
+                synchronized(progressLock) {
+                    if (!discovered && !chapterFailed) failedChapters++
+                    doneChapters++
+                }
+                onChapterDone()
+            }
+            synchronized(progressLock) {
+                if (state == State.RUNNING) {
+                    state = when {
+                        cachedImages + storedImages == 0 -> State.ALL_FAILED
+                        failedImages == 0 && failedChapters == 0 && emptyChapters == 0 -> State.SUCCESS
+                        else -> State.PARTIAL_FAILED
+                    }
+                }
+            }
+        } catch (e: CancellationException) {
+            state = State.CANCELED
+            throw e
+        }
+    }
+
     /**
      * 处理一章：取正文 -> 解析图片地址 -> 逐张走统一缓存入口。
      *
@@ -242,14 +292,15 @@ internal class MangaCacheTask(
      * 只看 `doneChapters` 会得出「下完了」的假结论。
      * 只保留当前章节的地址列表，章节间不累积。
      */
-    private suspend fun downloadChapter(index: Int) {
-        val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, index) ?: run {
-            failedChapters.incrementAndGet()
-            return
-        }
+    private suspend fun downloadChapter(
+        index: Int,
+        onTotal: (Int) -> Unit,
+        onResult: (ImageCacheResult) -> Unit,
+    ) {
+        val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, index) ?: return
         //卷节点本身是目录分组，不含图片：跳过，且既不算失败也不算「无图章节」
         if (chapter.isVolume) {
-            volumeChapters.incrementAndGet()
+            onTotal(0)
             return
         }
         val content = loadContent(chapter) ?: return
@@ -260,21 +311,14 @@ internal class MangaCacheTask(
             content = content,
             concurrency = MangaCache.CONCURRENCY,
             retryEach = MangaCache.MAX_RETRY,
-            onTotal = {
-                curImageTotal.set(it)
-                curImageDone.set(0)
-            },
-            onProgress = { curImageDone.set(it) },
+            onTotal = onTotal,
+            onResult = onResult,
         )
         if (stats.total == 0) {
             //正文在但解析不出图片：不能当作「下完了一章」
-            emptyChapters.incrementAndGet()
+            synchronized(progressLock) { emptyChapters++ }
             return
         }
-        processedImages.addAndGet(stats.done)
-        skippedImages.addAndGet(stats.hit)
-        successImages.addAndGet(stats.stored)
-        failedImages.addAndGet(stats.failed)
     }
 
     private suspend fun loadContent(chapter: BookChapter): String? {
@@ -285,7 +329,6 @@ internal class MangaCacheTask(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            failedChapters.incrementAndGet()
             AppLog.put("《${book.name}》${chapter.title} 正文获取失败\n${e.localizedMessage}", e)
             null
         }

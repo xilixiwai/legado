@@ -204,6 +204,7 @@ suspend fun ensureImageBatch(
     urls: List<String>,
     concurrency: Int,
     onProgress: (done: Int) -> Unit = {},
+    onResult: (ImageCacheResult) -> Unit = {},
     ensure: suspend (String) -> ImageCacheResult,
 ): ImageBatchStats {
     if (urls.isEmpty()) return ImageBatchStats(0)
@@ -223,6 +224,8 @@ suspend fun ensureImageBatch(
                         ImageCacheResult.FAILED
                     }
                     counters.incrementAndGet(result.ordinal)
+                    //最终结果立即交接；整章取消时，调用方仍保留此前完成的图片统计。
+                    onResult(result)
                     onProgress(done.incrementAndGet())
                 }
             }

@@ -93,7 +93,8 @@ class MangaCacheService : BaseService() {
         if (progress != null) {
             notificationBuilder
                 .setContentText(progress.text)
-                .setProgress(100, progress.percent, false)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(progress.text))
+                .setProgress(100, progress.percent, progress.indeterminate)
         } else {
             notificationBuilder.setContentText(getString(R.string.service_starting))
         }
@@ -104,7 +105,8 @@ class MangaCacheService : BaseService() {
         val progress = MangaCache.progress() ?: return
         notificationBuilder
             .setContentText(progress.text)
-            .setProgress(100, progress.percent, false)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(progress.text))
+            .setProgress(100, progress.percent, progress.indeterminate)
         notificationManager.notify(NotificationId.MangaCacheService, notificationBuilder.build())
     }
 
@@ -117,6 +119,7 @@ class MangaCacheService : BaseService() {
         if (text != null) {
             notificationBuilder
                 .setContentText(text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
                 .setProgress(0, 0, false)
                 .setOngoing(false)
                 .clearActions()
