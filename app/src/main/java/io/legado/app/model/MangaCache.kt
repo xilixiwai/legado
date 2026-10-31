@@ -135,6 +135,9 @@ internal class MangaCacheTask(
     private var doneChapters = 0
     private var discoveredChapters = 0
     private var discoveredImages = 0
+
+    /** 已获得并发槽、正在处理的图片数（onStart 与最终结果一一配对） */
+    private var downloadingImages = 0
     private var curImageDone = 0
     private var curImageTotal = 0
     private var storedImages = 0
@@ -172,6 +175,7 @@ internal class MangaCacheTask(
             curChapterDone = curImageDone,
             curChapterTotal = curImageTotal,
             discoveredImages = discoveredImages,
+            downloadingImages = downloadingImages,
             cachedImages = cachedImages,
             storedImages = storedImages,
             totalImagesKnown = discoveredChapters == totalChapters,
@@ -222,7 +226,12 @@ internal class MangaCacheTask(
 
     /** 逐章执行与统计；IO 和通知回调可替换，以行为测试覆盖真实任务状态流转。 */
     internal suspend fun processChapters(
-        download: suspend (Int, (Int) -> Unit, (ImageCacheResult) -> Unit) -> Unit = ::downloadChapter,
+        download: suspend (
+            index: Int,
+            onTotal: (Int) -> Unit,
+            onStart: () -> Unit,
+            onResult: (ImageCacheResult) -> Unit,
+        ) -> Unit = ::downloadChapter,
         onChapterDone: () -> Unit = { postEvent(EventBus.UP_DOWNLOAD, book.bookUrl) },
         onChapterError: (Int, Exception) -> Unit = { index, error ->
             AppLog.put("《${book.name}》第${index + 1}章处理失败\n${error.localizedMessage}", error)
@@ -246,6 +255,9 @@ internal class MangaCacheTask(
                             discoveredImages += total
                             curImageTotal = total
                         }
+                    }, {
+                        //真正获得并发槽、开始处理本张；与最终结果回调一一配对
+                        synchronized(progressLock) { downloadingImages++ }
                     }, { result ->
                         synchronized(progressLock) {
                             when (result) {
@@ -253,6 +265,7 @@ internal class MangaCacheTask(
                                 ImageCacheResult.STORED -> storedImages++
                                 ImageCacheResult.FAILED -> failedImages++
                             }
+                            if (downloadingImages > 0) downloadingImages--
                             curImageDone++
                         }
                     })
@@ -295,6 +308,7 @@ internal class MangaCacheTask(
     private suspend fun downloadChapter(
         index: Int,
         onTotal: (Int) -> Unit,
+        onStart: () -> Unit,
         onResult: (ImageCacheResult) -> Unit,
     ) {
         val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, index) ?: return
@@ -313,6 +327,7 @@ internal class MangaCacheTask(
             retryEach = MangaCache.MAX_RETRY,
             onTotal = onTotal,
             onResult = onResult,
+            onStart = onStart,
         )
         if (stats.total == 0) {
             //正文在但解析不出图片：不能当作「下完了一章」

@@ -198,6 +198,8 @@ data class ImageBatchStats(
  *
  * - 逐张处理，不预读下一章，内存里只有当前章节的地址列表；
  * - [concurrency] 同时约束在途请求数；
+ * - [onStart] 在图片真正获得并发槽、开始处理时触发（排队中的图片不会触发），
+ *   与 [onResult] 配对用于区分「正在下载 / 等待中」；
  * - 单张图片抛出的非取消除异常会被计为失败，不影响同批其它图片；
  * - 取消会立刻向上传播（调用方据此停止派发并放弃完整缓存标记）。
  */
@@ -206,6 +208,7 @@ suspend fun ensureImageBatch(
     concurrency: Int,
     onProgress: (done: Int) -> Unit = {},
     onResult: (ImageCacheResult) -> Unit = {},
+    onStart: () -> Unit = {},
     ensure: suspend (String) -> ImageCacheResult,
 ): ImageBatchStats {
     if (urls.isEmpty()) return ImageBatchStats(0)
@@ -217,6 +220,8 @@ suspend fun ensureImageBatch(
             launch {
                 permits.withPermit {
                     coroutineContext.ensureActive()
+                    //已获得并发槽、真正开始处理本张；取消的排队任务不会走到这里
+                    onStart()
                     val result = try {
                         ensure(url)
                     } catch (e: CancellationException) {

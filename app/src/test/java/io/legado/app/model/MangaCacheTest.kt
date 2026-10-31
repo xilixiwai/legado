@@ -31,6 +31,7 @@ class MangaCacheTest {
         failedChapters: Int = 0,
         running: Boolean = true,
         discovered: Int = 0,
+        downloading: Int = 0,
         cached: Int = 0,
         stored: Int = 0,
         totalKnown: Boolean = false,
@@ -41,6 +42,7 @@ class MangaCacheTest {
         curChapterDone = curDone,
         curChapterTotal = curTotal,
         discoveredImages = discovered,
+        downloadingImages = downloading,
         cachedImages = cached,
         storedImages = stored,
         totalImagesKnown = totalKnown,
@@ -125,49 +127,51 @@ class MangaCacheTest {
         assertEquals(100, progress(0, 2, discovered = 100, stored = 999, totalKnown = true).percent)
     }
 
-    // ---------- 4. 通知文案 ----------
+    // ---------- 4. 通知文案（四状态统计，单位均为图片） ----------
 
     @Test
-    fun `运行中章节标签显示正在处理的下一章`() {
-        assertEquals("1/480", progress(0, 480).chapterLabel)
-        assertEquals("13/480", progress(12, 480).chapterLabel)
-        assertEquals("480/480", progress(479, 480).chapterLabel)
-        //最后一章处理完但状态尚未翻转，也不能溢出
-        assertEquals("480/480", progress(480, 480).chapterLabel)
+    fun `通知正文为四状态统计格式且等待数由真实状态派生`() {
+        //discovered=56, 正在下载=2, 已处理=成功35+失败1=36 → 等待中=56-2-36=18
+        val text = progress(
+            12, 480, discovered = 56, downloading = 2,
+            cached = 2, stored = 33, failedImages = 1, totalKnown = false,
+        ).text
+        assertEquals("《测试漫画》 正在下载:2 | 等待中:18 | 失败:1 | 成功:35 · 总数待定", text)
     }
 
     @Test
-    fun `结束后章节标签不再加一`() {
-        assertEquals("480/480", progress(480, 480, running = false).chapterLabel)
-        assertEquals("0/480", progress(0, 480, running = false).chapterLabel)
-        assertEquals("0/0", progress(0, 0).chapterLabel)
+    fun `命中与新增都计入成功且总数确定后不追加待定标记`() {
+        val text = progress(
+            3, 3, discovered = 24, downloading = 0,
+            cached = 9, stored = 15, failedImages = 0, totalKnown = true,
+        ).text
+        assertEquals("《测试漫画》 正在下载:0 | 等待中:0 | 失败:0 | 成功:24", text)
     }
 
     @Test
-    fun `通知文案包含漫画名 章节 图片与失败数`() {
-        val text = progress(12, 480, discovered = 24, cached = 2, stored = 3, failedImages = 3).text
-        assertTrue(text, text.contains("测试漫画"))
-        assertTrue(text, text.contains("13/480"))
-        assertTrue(text, text.contains("8/24"))
-        assertTrue(text, text.contains("成功 5"))
-        assertTrue(text, text.contains("命中 2，新增 3"))
-        assertTrue(text, text.contains("失败 3"))
-        //章节级失败只在出现时追加
-        assertFalse(text, text.contains("章节失败"))
+    fun `等待数不会出现负数`() {
+        val p = progress(0, 1, discovered = 5, downloading = 3, cached = 2, stored = 2)
+        assertEquals(0, p.waitingImages)
     }
 
     @Test
-    fun `有整章失败时文案追加章节失败数`() {
-        val text = progress(12, 480, failedImages = 3, failedChapters = 2).text
-        assertTrue(text, text.contains("章节失败 2"))
+    fun `任务结束后正在下载与等待归零且未处理不计入失败`() {
+        //取消时 discovered=50、成功35、失败1，其余 14 张未处理
+        val p = progress(12, 12, discovered = 50, downloading = 2,
+            cached = 10, stored = 25, failedImages = 1, running = false, totalKnown = true)
+        assertFalse(p.running)
+        assertEquals("等待中必须归零", 0, p.waitingImages)
+        assertEquals(1, p.failedImages)
+        assertEquals(35, p.successImages)
+        assertTrue(p.text, p.text.contains("正在下载:0 | 等待中:0 | 失败:1 | 成功:35"))
     }
 
     @Test
-    fun `尚未解析全部章节时明确标记已发现而非最终总数`() {
+    fun `尚未解析全部章节时明确标记总数待定`() {
         val p = progress(12, 480, discovered = 24, stored = 24)
         assertTrue(p.indeterminate)
         assertEquals(0, p.percent)
-        assertTrue(p.text, p.text.contains("已发现，总数待定"))
+        assertTrue(p.text, p.text.contains("总数待定"))
     }
 
     // ---------- 5. 单张图片重试 ----------

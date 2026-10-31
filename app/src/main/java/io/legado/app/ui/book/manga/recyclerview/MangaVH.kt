@@ -1,5 +1,6 @@
 package io.legado.app.ui.book.manga.recyclerview
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.graphics.Bitmap
@@ -30,6 +31,7 @@ import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.getBookSource
 import io.legado.app.help.book.isImage
 import io.legado.app.help.glide.ImageLoader
+import io.legado.app.help.glide.progress.ProgressManager
 import io.legado.app.model.BookCover
 import io.legado.app.model.ImageCacheResult
 import io.legado.app.model.ReadManga
@@ -85,6 +87,9 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
     /** 首帧估算用的一次性 OnPreDraw 监听（重绑/回收时移除，防止旧轨迹记到新页面的绘制帧） */
     private var drawListener: ViewTreeObserver.OnPreDrawListener? = null
 
+    /** 当前绑定的下载进度监听地址（重绑/回收/失败时移除，不给已失效的 UI 写进度） */
+    private var progressUrl: String? = null
+
     fun initComponent(
         loading: ProgressBar,
         image: AppCompatImageView,
@@ -118,9 +123,11 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
         mImage.tag = imageUrl
         mFlProgress.isVisible = true
         mLoading.isVisible = true
-        //统一入口自己下载，没有流式百分比可报
+        //中央百分比只反映统一下载入口的真实字节进度：
+        //缓存命中/内存兜底不产生下载事件，此时只保留转圈，不显示虚假百分比
         mProgress.isVisible = false
         mRetry?.isGone = true
+        registerDownloadProgress(imageUrl, sequence)
         val source = ReadManga.bookSource ?: book.getBookSource()
         val chapter = ReadManga.curMangaChapter?.chapter
         //诊断轨迹：只在记录日志开启时创建；pre 快照区分预取在途/已有缓存/全新下载
@@ -194,9 +201,35 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
     /** 复用/销毁时取消在途加载 */
     fun cancelLoad() {
         loadSequence++
+        removeProgressListener()
         removeDrawListener()
         loadJob?.cancel()
         loadJob = null
+    }
+
+    /**
+     * 中央加载百分比（原有 UI 通路的恢复）：监听统一下载入口的真实字节进度。
+     * ProgressResponseBody 在主线程回调，这里只做整数百分比合并与 TextView 更新；
+     * 每次绑定先移除旧监听并新建判定器，旧图片进度不会污染新图片；
+     * 回调先过 [canDeliverToUi]，重绑/回收/失败后的过期事件一律不触碰 UI。
+     */
+    @SuppressLint("SetTextI18n")
+    private fun registerDownloadProgress(imageUrl: String, sequence: Int) {
+        removeProgressListener()
+        progressUrl = imageUrl
+        val progress = MangaPageProgress()
+        ProgressManager.addListener(imageUrl) { _, percentage, _, totalBytes ->
+            if (!canDeliverToUi(sequence, imageUrl)) return@addListener
+            progress.onEvent(percentage, totalBytes)?.let { pct ->
+                mProgress.isVisible = true
+                mProgress.text = "$pct%"
+            }
+        }
+    }
+
+    private fun removeProgressListener() {
+        progressUrl?.let { ProgressManager.removeListener(it) }
+        progressUrl = null
     }
 
     /** 移除未触发的首帧估算监听（幂等；监听自身触发时也会摘除并清引用） */
@@ -504,6 +537,7 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
         mLoading.isGone = true
         mRetry?.isVisible = true
         mProgress.isGone = true
+        removeProgressListener()
         itemView.updateLayoutParams<ViewGroup.LayoutParams> {
             height = ViewGroup.LayoutParams.MATCH_PARENT
         }

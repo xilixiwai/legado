@@ -3,6 +3,7 @@ package io.legado.app.help.http
 import io.legado.app.constant.AppConst
 import io.legado.app.help.CacheManager
 import io.legado.app.help.config.AppConfig
+import io.legado.app.help.glide.progress.ProgressManager
 import io.legado.app.help.glide.progress.ProgressManager.LISTENER
 import io.legado.app.help.glide.progress.ProgressResponseBody
 import io.legado.app.help.http.CookieManager.cookieJarHeader
@@ -67,6 +68,20 @@ val okHttpClient: OkHttpClient by lazy {
         .followRedirects(true)
         .followSslRedirects(true)
         .addInterceptor(OkHttpExceptionInterceptor)
+        .addInterceptor { chain ->
+            val request = chain.request()
+            val url = request.url.toString()
+            //只有阅读页正在监听该地址的下载进度时才包装响应体（键规则与 Glide 侧一致）；
+            //无监听时零包装、零逐块回调，小说与其它请求的行为和开销完全不变
+            if (ProgressManager.getProgressListener(url) == null) {
+                chain.proceed(request)
+            } else {
+                val response = chain.proceed(request)
+                response.newBuilder()
+                    .body(ProgressResponseBody(url, LISTENER, response.body))
+                    .build()
+            }
+        }
         .addInterceptor { chain ->
             val request = chain.request()
             val builder = request.newBuilder()

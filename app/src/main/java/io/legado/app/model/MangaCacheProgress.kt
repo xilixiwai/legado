@@ -5,7 +5,8 @@ package io.legado.app.model
  *
  * 只做数值与文案换算，不依赖 Android、数据库或协程，便于 JVM 单元测试。
  * 图片数随逐章解析累加；只有全部章节的图片列表都已取得才有可靠分母。
- * 失败也算已处理，但不算成功；缓存命中与新保存分别计数。
+ * 统计单位一律是**图片**：成功=缓存命中+新增保存，失败=最终 FAILED，
+ * 正在下载=已获得并发槽的图片，等待中=已发现但尚未开始处理。
  */
 data class MangaCacheProgress(
     val bookName: String,
@@ -18,6 +19,8 @@ data class MangaCacheProgress(
     /** 当前章节图片总数 */
     val curChapterTotal: Int,
     val discoveredImages: Int,
+    /** 已获得并发槽、正在处理的图片数（任务结束后由任务侧归零） */
+    val downloadingImages: Int,
     val cachedImages: Int,
     val storedImages: Int,
     val totalImagesKnown: Boolean,
@@ -32,6 +35,14 @@ data class MangaCacheProgress(
 
     val processedImages: Int get() = successImages + failedImages
 
+    /** 等待中=已发现但尚未开始处理；任务结束后归零（未处理的图片不计入失败） */
+    val waitingImages: Int
+        get() = if (!running) {
+            0
+        } else {
+            (discoveredImages - downloadingImages - processedImages).coerceAtLeast(0)
+        }
+
     /** 总数未知或无图片时不展示确定进度，更不能用章节比例代替。 */
     val indeterminate: Boolean get() = !totalImagesKnown || discoveredImages <= 0
 
@@ -42,25 +53,19 @@ data class MangaCacheProgress(
             (processedImages.toLong() * 100L / discoveredImages).coerceIn(0, 100).toInt()
         }
 
-    /** 通知里显示的「当前章节/总章节」，运行中显示正在处理的下一章 */
-    val chapterLabel: String
-        get() {
-            if (totalChapters <= 0) return "0/0"
-            val current = if (running) doneChapters + 1 else doneChapters
-            return "${current.coerceIn(0, totalChapters)}/$totalChapters"
-        }
-
+    /**
+     * 通知正文：与小说下载通知同一套简洁四状态格式，单位均为图片。
+     * 任务结束后正在下载与等待中必须归零，只保留最终成功/失败数。
+     */
     val text: String
         get() = buildString {
             append('《').append(bookName).append("》 ")
-            append("已处理 ").append(processedImages).append('/').append(discoveredImages).append(" 张")
-            append(if (totalImagesKnown) "（总数）" else "（已发现，总数待定）")
-            append(" · 成功 ").append(successImages)
-            append("（命中 ").append(cachedImages).append("，新增 ").append(storedImages).append('）')
-            append(" · 失败 ").append(failedImages)
-            append(" · ").append(chapterLabel).append(" 章")
-            if (failedChapters > 0) {
-                append(" · 章节失败 ").append(failedChapters)
+            append("正在下载:").append(if (running) downloadingImages else 0)
+            append(" | 等待中:").append(waitingImages)
+            append(" | 失败:").append(failedImages)
+            append(" | 成功:").append(successImages)
+            if (!totalImagesKnown) {
+                append(" · 总数待定")
             }
         }
 }
