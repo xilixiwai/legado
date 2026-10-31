@@ -124,4 +124,26 @@ class MangaPageProgressTest {
         //流操作符 flow.onStart 与本回调无关；断言小说没有向统一入口传递 onStart 回调
         assertEquals("小说链路不得传递 onStart 回调", 0, countOf(cacheBook, "onStart ="))
     }
+
+    @Test
+    fun `整本下载通知收起态只放四状态书名进展开正文且标题不变`() {
+        val service = source("app/src/main/java/io/legado/app/service/MangaCacheService.kt")
+        assertTrue("通知标题仍为「离线缓存」", service.contains("R.string.offline_cache"))
+        //收起态正文=纯四状态；书名进展开正文第一行，避免拼接导致数字被截断
+        val apply = block(service, "private fun NotificationCompat.Builder.applyProgress(", "\n    }")
+        assertOrder(
+            apply,
+            "setContentText(progress.statusLine)",
+            "BigTextStyle().bigText(progress.bigText)"
+        )
+        val progress = source("app/src/main/java/io/legado/app/model/MangaCacheProgress.kt")
+        val bigTextBlock = block(progress, "val bigText: String", "\n}")
+        assertTrue("展开正文由书名行+状态行组成", bigTextBlock.contains("headerLine") && bigTextBlock.contains("statusLine"))
+        //结束通知：第一行作收起正文，两行进展开正文
+        val finish = block(service, "private fun finishNotification(", "\n    }")
+        assertTrue(finish.contains("text.substringBefore('\\n')"))
+        //小说通知完全不受影响
+        val novel = source("app/src/main/java/io/legado/app/service/CacheBookService.kt")
+        assertFalse("小说通知不得引用漫画进度字段", novel.contains("MangaCacheProgress") || novel.contains("statusLine"))
+    }
 }

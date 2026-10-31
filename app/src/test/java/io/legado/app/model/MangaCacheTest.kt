@@ -127,25 +127,33 @@ class MangaCacheTest {
         assertEquals(100, progress(0, 2, discovered = 100, stored = 999, totalKnown = true).percent)
     }
 
-    // ---------- 4. 通知文案（四状态统计，单位均为图片） ----------
+    // ---------- 4. 通知文案（收起态=纯四状态，展开态=书名换行四状态） ----------
 
     @Test
-    fun `通知正文为四状态统计格式且等待数由真实状态派生`() {
+    fun `收起态正文为纯四状态且等待数由真实状态派生`() {
         //discovered=56, 正在下载=2, 已处理=成功35+失败1=36 → 等待中=56-2-36=18
-        val text = progress(
+        val p = progress(
             12, 480, discovered = 56, downloading = 2,
             cached = 2, stored = 33, failedImages = 1, totalKnown = false,
-        ).text
-        assertEquals("《测试漫画》 正在下载:2 | 等待中:18 | 失败:1 | 成功:35 · 总数待定", text)
+        )
+        assertEquals("正在下载:2 | 等待中:18 | 失败:1 | 成功:35", p.statusLine)
+        assertFalse("书名不得拼进状态行挤占截断空间", p.statusLine.contains("测试漫画"))
     }
 
     @Test
-    fun `命中与新增都计入成功且总数确定后不追加待定标记`() {
-        val text = progress(
+    fun `展开正文第一行书名第二行四状态且总数待定挂在书名行`() {
+        val unknown = progress(
+            12, 480, discovered = 56, downloading = 2,
+            cached = 2, stored = 33, failedImages = 1, totalKnown = false,
+        )
+        assertEquals("《测试漫画》 · 总数待定", unknown.headerLine)
+        assertEquals("《测试漫画》 · 总数待定\n正在下载:2 | 等待中:18 | 失败:1 | 成功:35", unknown.bigText)
+        val known = progress(
             3, 3, discovered = 24, downloading = 0,
             cached = 9, stored = 15, failedImages = 0, totalKnown = true,
-        ).text
-        assertEquals("《测试漫画》 正在下载:0 | 等待中:0 | 失败:0 | 成功:24", text)
+        )
+        assertEquals("总数确定后不追加待定标记", "《测试漫画》", known.headerLine)
+        assertEquals("《测试漫画》\n正在下载:0 | 等待中:0 | 失败:0 | 成功:24", known.bigText)
     }
 
     @Test
@@ -163,7 +171,7 @@ class MangaCacheTest {
         assertEquals("等待中必须归零", 0, p.waitingImages)
         assertEquals(1, p.failedImages)
         assertEquals(35, p.successImages)
-        assertTrue(p.text, p.text.contains("正在下载:0 | 等待中:0 | 失败:1 | 成功:35"))
+        assertTrue(p.statusLine, p.statusLine.contains("正在下载:0 | 等待中:0 | 失败:1 | 成功:35"))
     }
 
     @Test
@@ -171,7 +179,7 @@ class MangaCacheTest {
         val p = progress(12, 480, discovered = 24, stored = 24)
         assertTrue(p.indeterminate)
         assertEquals(0, p.percent)
-        assertTrue(p.text, p.text.contains("总数待定"))
+        assertTrue(p.headerLine, p.headerLine.contains("总数待定"))
     }
 
     // ---------- 5. 单张图片重试 ----------

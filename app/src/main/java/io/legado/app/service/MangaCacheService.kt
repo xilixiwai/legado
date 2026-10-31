@@ -9,6 +9,7 @@ import io.legado.app.constant.AppConst
 import io.legado.app.constant.IntentAction
 import io.legado.app.constant.NotificationId
 import io.legado.app.model.MangaCache
+import io.legado.app.model.MangaCacheProgress
 import io.legado.app.ui.book.cache.CacheActivity
 import io.legado.app.utils.activityPendingIntent
 import io.legado.app.utils.servicePendingIntent
@@ -91,10 +92,7 @@ class MangaCacheService : BaseService() {
     override fun startForegroundNotification() {
         val progress = MangaCache.progress()
         if (progress != null) {
-            notificationBuilder
-                .setContentText(progress.text)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(progress.text))
-                .setProgress(100, progress.percent, progress.indeterminate)
+            notificationBuilder.applyProgress(progress)
         } else {
             notificationBuilder.setContentText(getString(R.string.service_starting))
         }
@@ -103,11 +101,19 @@ class MangaCacheService : BaseService() {
 
     private fun upNotification() {
         val progress = MangaCache.progress() ?: return
-        notificationBuilder
-            .setContentText(progress.text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(progress.text))
-            .setProgress(100, progress.percent, progress.indeterminate)
+        notificationBuilder.applyProgress(progress)
         notificationManager.notify(NotificationId.MangaCacheService, notificationBuilder.build())
+    }
+
+    /**
+     * 通知文字布局：标题固定「离线缓存」；收起态正文只放四状态
+     * （书名拼在前面会把状态数字挤到系统截断线之外），
+     * 展开正文第一行书名（总数待定挂在书名行）、第二行四状态。
+     */
+    private fun NotificationCompat.Builder.applyProgress(progress: MangaCacheProgress) {
+        setContentText(progress.statusLine)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(progress.bigText))
+            .setProgress(100, progress.percent, progress.indeterminate)
     }
 
     /**
@@ -117,8 +123,9 @@ class MangaCacheService : BaseService() {
     private fun finishNotification() {
         val text = MangaCache.lastFinishText
         if (text != null) {
+            //结束文案两行：第一行「状态 · 书名」作收起态正文，第二行四状态进展开正文
             notificationBuilder
-                .setContentText(text)
+                .setContentText(text.substringBefore('\n'))
                 .setStyle(NotificationCompat.BigTextStyle().bigText(text))
                 .setProgress(0, 0, false)
                 .setOngoing(false)

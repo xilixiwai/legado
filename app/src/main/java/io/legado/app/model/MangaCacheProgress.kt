@@ -54,18 +54,23 @@ data class MangaCacheProgress(
         }
 
     /**
-     * 通知正文：与小说下载通知同一套简洁四状态格式，单位均为图片。
+     * 收起态正文：纯四状态统计，单位均为图片。
+     * 不再拼接书名——书名拼在前面会把状态数字挤到系统截断线之外。
      * 任务结束后正在下载与等待中必须归零，只保留最终成功/失败数。
      */
-    val text: String
-        get() = buildString {
-            append('《').append(bookName).append("》 ")
-            append("正在下载:").append(if (running) downloadingImages else 0)
-            append(" | 等待中:").append(waitingImages)
-            append(" | 失败:").append(failedImages)
-            append(" | 成功:").append(successImages)
-            if (!totalImagesKnown) {
-                append(" · 总数待定")
-            }
+    val statusLine: String
+        get() = "正在下载:${if (running) downloadingImages else 0}" +
+                " | 等待中:$waitingImages | 失败:$failedImages | 成功:$successImages"
+
+    /** 展开态第一行：书名；总数未定时把提示挂在书名行，不挤占状态行 */
+    val headerLine: String
+        get() = if (!totalImagesKnown) {
+            "《$bookName》 · 总数待定"
+        } else {
+            "《$bookName》"
         }
+
+    /** 展开正文：第一行书名，第二行四状态（与小说下载通知同一套状态格式） */
+    val bigText: String
+        get() = "$headerLine\n$statusLine"
 }

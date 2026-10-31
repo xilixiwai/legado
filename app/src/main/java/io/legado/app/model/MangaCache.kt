@@ -194,10 +194,11 @@ internal class MangaCacheTask(
             State.RUNNING -> "已结束"
         }
         buildString {
-            append(stateText).append(" · ").append(snapshot().text)
+            append(stateText).append(" · ").append(snapshot().headerLine)
             if (emptyChapters > 0) {
                 append(" · 无图章节 ").append(emptyChapters)
             }
+            append('\n').append(snapshot().statusLine)
         }
     }
 

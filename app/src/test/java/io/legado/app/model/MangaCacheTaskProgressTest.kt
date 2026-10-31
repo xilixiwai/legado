@@ -131,7 +131,7 @@ class MangaCacheTaskProgressTest {
                 assertEquals(0, p.curChapterTotal)
                 assertTrue(p.indeterminate)
                 assertEquals(0, p.percent)
-                assertTrue(p.text.contains("总数待定"))
+                assertTrue(p.headerLine.contains("总数待定"))
             }
             batch(List(3) { ImageCacheResult.HIT }, total, start, result)
         }
@@ -398,7 +398,7 @@ class MangaCacheTaskProgressTest {
             val running = task.snapshot()
             assertEquals("只有拿到并发槽的 1 张在下载", 1, running.downloadingImages)
             assertEquals("其余 3 张还在等待", 3, running.waitingImages)
-            assertTrue(running.text.contains("正在下载:1 | 等待中:3"))
+            assertTrue(running.statusLine.contains("正在下载:1 | 等待中:3"))
             release.complete(Unit)
             job.join()
             val p = task.snapshot()
@@ -442,7 +442,7 @@ class MangaCacheTaskProgressTest {
         }
         val p = task.snapshot()
         assertEquals(MangaCacheTask.State.PARTIAL_FAILED, task.state)
-        assertTrue(p.text, p.text.contains("正在下载:0 | 等待中:0 | 失败:0 | 成功:1"))
+        assertTrue(p.statusLine, p.statusLine.contains("正在下载:0 | 等待中:0 | 失败:0 | 成功:1"))
         //未处理的 2 张不计入失败
         assertEquals(0, p.failedImages)
     }
@@ -470,6 +470,6 @@ class MangaCacheTaskProgressTest {
         assertEquals(2, p.failedImages)
         assertEquals("成功=命中+新增", 4, p.successImages)
         assertEquals("全部终态后无在途图片", 0, p.downloadingImages)
-        assertTrue(p.text.contains("正在下载:0 | 等待中:0 | 失败:2 | 成功:4"))
+        assertTrue(p.statusLine.contains("正在下载:0 | 等待中:0 | 失败:2 | 成功:4"))
     }
 }
