@@ -67,8 +67,10 @@ object LogUtils {
                 }
             }
             val date = getCurrentDateStr(TIME_PATTERN).replace(" ", "_").replace(":", "-")
-            val logPath = FileUtils.getPath(root = logFolder, "appLog-$date.txt")
-            return AsyncFileHandler(logPath).apply {
+            //诊断日志容量控制：同日追加写（重启不丢），单文件 2MB、滚动 3 段（单日上限 6MB），
+            //历史过期文件仍由上方 7 天清理兜底删除。
+            val logPath = FileUtils.getPath(root = logFolder, "appLog-${date}_%g.txt")
+            return AsyncFileHandler(logPath, limit = 2_000_000, count = 3, append = true).apply {
                 formatter = object : java.util.logging.Formatter() {
                     override fun format(record: LogRecord): String {
                         // 设置文件输出格式

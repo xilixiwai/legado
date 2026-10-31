@@ -24,6 +24,7 @@ import com.bumptech.glide.load.engine.GlideException
 import com.bumptech.glide.request.RequestListener
 import com.bumptech.glide.request.target.Target
 import io.legado.app.constant.AppLog
+import io.legado.app.help.MangaPerfLog
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.getBookSource
 import io.legado.app.help.book.isImage
@@ -116,41 +117,70 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
         mRetry?.isGone = true
         val source = ReadManga.bookSource ?: book.getBookSource()
         val chapter = ReadManga.curMangaChapter?.chapter
+        //诊断轨迹：只在记录日志开启时创建；pre 快照区分预取在途/已有缓存/全新下载
+        val trace = if (MangaPerfLog.enabled) {
+            MangaPerfLog.Trace(
+                MangaPerfLog.imgId(imageUrl), MangaPerfLog.currentFlipId(), src = "display"
+            ).apply { preState = BookHelp.preloadStateOf(book, imageUrl) }
+        } else null
         loadJob = loadScope.launch {
-            var imageData: ByteArray? = null
-            var hitFile: File? = null
-            val ensureStart = System.nanoTime()
-            val result = try {
-                BookHelp.ensureImage(
-                    source, book, imageUrl, chapter,
-                    onImageData = { imageData = it },
-                    onHitFile = { hitFile = it },
-                )
+            try {
+                var imageData: ByteArray? = null
+                var hitFile: File? = null
+                val ensureStart = System.nanoTime()
+                val result = try {
+                    BookHelp.ensureImage(
+                        source, book, imageUrl, chapter,
+                        onImageData = { imageData = it },
+                        onHitFile = { hitFile = it },
+                        trace = trace,
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    e.printOnDebug()
+                    ImageCacheResult.FAILED
+                }
+                val ensureMs = (System.nanoTime() - ensureStart) / 1_000_000
+                //异常识别：快照时预取在途、本任务却又发起了下载 → 疑似未等预取
+                if (trace != null && trace.netMs != null && trace.preState == "running") {
+                    trace.anomaly = "dup-net"
+                }
+                withContext(Dispatchers.Main) {
+                    if (!canDeliverToUi(sequence, imageUrl)) {
+                        trace?.cancel("stale")
+                        MangaPerfLog.summary(trace)
+                        return@withContext
+                    }
+                    val bytes = imageData
+                    if (result != ImageCacheResult.FAILED) {
+                        if (trace != null) {
+                            trace.out = if (result == ImageCacheResult.HIT) "hit" else "stored"
+                        }
+                        loadFromCache(
+                            imageUrl, sequence, hitFile, result, ensureMs,
+                            isHorizontal, isLastImage, transformation, trace
+                        )
+                    } else if (bytes != null) {
+                        if (trace != null) trace.out = "bytes"
+                        loadFromBytes(
+                            imageUrl, sequence, bytes, result, ensureMs,
+                            isHorizontal, isLastImage, transformation, trace
+                        )
+                    } else {
+                        if (trace != null) {
+                            trace.fail("ensure failed")
+                            MangaPerfLog.summary(trace)
+                            MangaPerfLog.detail(trace, "fail")
+                        }
+                        showFail()
+                    }
+                }
             } catch (e: CancellationException) {
+                //取消（重绑/复用回收/页面退出）：与失败严格区分记录
+                trace?.cancel("cancel")
+                MangaPerfLog.summary(trace)
                 throw e
-            } catch (e: Exception) {
-                e.printOnDebug()
-                ImageCacheResult.FAILED
-            }
-            val ensureMs = (System.nanoTime() - ensureStart) / 1_000_000
-            withContext(Dispatchers.Main) {
-                if (!canDeliverToUi(sequence, imageUrl)) {
-                    return@withContext
-                }
-                val bytes = imageData
-                if (result != ImageCacheResult.FAILED) {
-                    loadFromCache(
-                        imageUrl, sequence, hitFile, result, ensureMs,
-                        isHorizontal, isLastImage, transformation
-                    )
-                } else if (bytes != null) {
-                    loadFromBytes(
-                        imageUrl, sequence, bytes, result, ensureMs,
-                        isHorizontal, isLastImage, transformation
-                    )
-                } else {
-                    showFail()
-                }
             }
         }
     }
@@ -204,6 +234,7 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
         isHorizontal: Boolean,
         isLastImage: Boolean,
         transformation: Transformation<Bitmap>?,
+        trace: MangaPerfLog.Trace?,
     ) {
         var builder = ImageLoader.load(context, bytes)
             .diskCacheStrategy(DiskCacheStrategy.NONE)
@@ -218,6 +249,7 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
                 isFirstResource: Boolean,
             ): Boolean {
                 logSlowLoad(imageUrl, result, ensureMs, (System.nanoTime() - glideStart) / 1_000_000)
+                emitFail(trace, glideStart, e?.localizedMessage ?: "bytes decode failed")
                 if (canDeliverToUi(sequence, imageUrl)) showFail()
                 return true
             }
@@ -231,7 +263,13 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
             ): Boolean {
                 logSlowLoad(imageUrl, result, ensureMs, (System.nanoTime() - glideStart) / 1_000_000)
                 val deliver = canDeliverToUi(sequence, imageUrl)
-                if (deliver) applyReadyLayout(isHorizontal, isLastImage)
+                if (deliver) {
+                    applyReadyLayout(isHorizontal, isLastImage)
+                    emitReady(trace, glideStart)
+                } else {
+                    trace?.cancel("stale")
+                    MangaPerfLog.summary(trace)
+                }
                 return !deliver
             }
         }).into(mImage)
@@ -250,6 +288,7 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
         isHorizontal: Boolean,
         isLastImage: Boolean,
         transformation: Transformation<Bitmap>?,
+        trace: MangaPerfLog.Trace?,
     ) {
         val file = hitFile ?: run {
             val book = ReadManga.book
@@ -267,13 +306,22 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
                     isFirstResource: Boolean,
                 ): Boolean {
                     logSlowLoad(imageUrl, result, ensureMs, (System.nanoTime() - glideStart) / 1_000_000)
+                    if (trace != null) {
+                        trace.glideMs = MangaPerfLog.msSince(glideStart)
+                        trace.fail("glide decode failed")
+                    }
                     if (!canDeliverToUi(sequence, imageUrl)) return true
                     //文件通过了统一校验，却在 Glide 这层解不开：删掉，避免下次继续命中
                     file.delete()
                     //不在监听器回调里直接重入 Glide：投递到主队列，执行前重新校验身份与生命周期
                     mImage.post {
                         if (canDeliverToUi(sequence, imageUrl)) {
-                            loadNetworkFallback(imageUrl, sequence, isHorizontal, isLastImage, transformation)
+                            loadNetworkFallback(
+                                imageUrl, sequence, isHorizontal, isLastImage, transformation, trace
+                            )
+                        } else {
+                            trace?.cancel("stale")
+                            MangaPerfLog.summary(trace)
                         }
                     }
                     return true
@@ -288,7 +336,13 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
                 ): Boolean {
                     logSlowLoad(imageUrl, result, ensureMs, (System.nanoTime() - glideStart) / 1_000_000)
                     val deliver = canDeliverToUi(sequence, imageUrl)
-                    if (deliver) applyReadyLayout(isHorizontal, isLastImage)
+                    if (deliver) {
+                        applyReadyLayout(isHorizontal, isLastImage)
+                        emitReady(trace, glideStart)
+                    } else {
+                        trace?.cancel("stale")
+                        MangaPerfLog.summary(trace)
+                    }
                     return !deliver
                 }
             })
@@ -305,7 +359,9 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
         isHorizontal: Boolean,
         isLastImage: Boolean,
         transformation: Transformation<Bitmap>?,
+        trace: MangaPerfLog.Trace? = null,
     ) {
+        val glideStart = System.nanoTime()
         BookCover.loadManga(
             context,
             imageUrl,
@@ -318,6 +374,7 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
                 target: Target<Drawable>,
                 isFirstResource: Boolean,
             ): Boolean {
+                emitFail(trace, glideStart, e?.localizedMessage ?: "network fallback failed")
                 if (canDeliverToUi(sequence, imageUrl)) showFail()
                 return false
             }
@@ -330,10 +387,56 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
                 isFirstResource: Boolean,
             ): Boolean {
                 val deliver = canDeliverToUi(sequence, imageUrl)
-                if (deliver) applyReadyLayout(isHorizontal, isLastImage)
+                if (deliver) {
+                    if (trace != null) trace.out = "net"
+                    applyReadyLayout(isHorizontal, isLastImage)
+                    emitReady(trace, glideStart)
+                } else {
+                    trace?.cancel("stale")
+                    MangaPerfLog.summary(trace)
+                }
                 return !deliver
             }
         }).into(mImage)
+    }
+
+    /**
+     * 成功交付终端：记录 glide 段耗时并发汇总行（一次加载只发一条，含兜底链）；
+     * 慢页（≥[MangaPerfLog.SLOW_THRESHOLD_MS]）或详细模式再发阶段明细，
+     * 并登记 OnPreDraw 首帧估算（est，非真实上屏时刻）。
+     */
+    private fun emitReady(trace: MangaPerfLog.Trace?, glideStart: Long) {
+        if (trace == null) return
+        trace.glideMs = MangaPerfLog.msSince(glideStart)
+        MangaPerfLog.summary(trace)
+        if (trace.isSlow() || MangaPerfLog.verbose) {
+            MangaPerfLog.detail(trace, if (trace.isSlow()) "slow" else "verbose")
+            val readyNs = System.nanoTime()
+            //一次性 OnPreDraw：资源就绪到下一绘制帧的间隔（估算值，非真实上屏时刻）
+            mImage.viewTreeObserver.addOnPreDrawListener(
+                object : android.view.ViewTreeObserver.OnPreDrawListener {
+                    private var fired = false
+                    override fun onPreDraw(): Boolean {
+                        if (fired) return true
+                        fired = true
+                        mImage.viewTreeObserver.removeOnPreDrawListener(this)
+                        val drawMs = MangaPerfLog.msSince(readyNs)
+                        trace.drawMs = drawMs
+                        MangaPerfLog.draw(trace.img, trace.flipId, drawMs)
+                        return true
+                    }
+                }
+            )
+        }
+    }
+
+    /** 失败终端：记录 glide 段耗时、置失败原因并发汇总 + 明细（emit 幂等，兜底链只发一次） */
+    private fun emitFail(trace: MangaPerfLog.Trace?, glideStart: Long, reason: String) {
+        if (trace == null) return
+        trace.glideMs = MangaPerfLog.msSince(glideStart)
+        trace.fail(reason)
+        MangaPerfLog.summary(trace)
+        MangaPerfLog.detail(trace, "fail")
     }
 
     private fun applyReadyLayout(isHorizontal: Boolean, isLastImage: Boolean) {

@@ -13,6 +13,7 @@ import io.legado.app.data.appDb
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.BookSource
+import io.legado.app.help.MangaPerfLog
 import io.legado.app.help.config.AppConfig
 import io.legado.app.model.ImageBatchStats
 import io.legado.app.model.ImageCacheResult
@@ -715,18 +716,22 @@ object BookHelp {
         chapter: BookChapter? = null,
         onImageData: ((ByteArray) -> Unit)? = null,
         onHitFile: ((File) -> Unit)? = null,
+        trace: MangaPerfLog.Trace? = null,
     ): ImageCacheResult {
         if (src.isBlank()) return ImageCacheResult.FAILED
         //命中快路径：单次解析即完成校验与文件交接，不必进入互斥入口再校验一遍；
         //未命中才走统一入口（下载/写入语义完全不变）。并发场景不会重复下载：
         //这里只做只读解析，真正的下载仍由 ensure 内的互斥与锁下去重保证。
         if (onHitFile != null) {
+            val checkStart = if (trace != null) MangaPerfLog.nowNs() else 0L
             getValidatedImageFile(book, src)?.let {
+                if (trace != null) trace.checkMs = MangaPerfLog.msSince(checkStart)
                 onHitFile(it)
                 return ImageCacheResult.HIT
             }
+            if (trace != null) trace.checkMs = MangaPerfLog.msSince(checkStart)
         }
-        return imageCache(bookSource, book, chapter).ensure(src, onImageData)
+        return imageCache(bookSource, book, chapter, trace).ensure(src, onImageData)
     }
 
     /**
@@ -781,6 +786,16 @@ object BookHelp {
     }
 
     /**
+     * 诊断用：图片预取/缓存状态快照（纯 stat 探测，零解码，不改变任何状态）。
+     * running=预取在途；cached=本地已有候选；none=两者皆无。
+     */
+    fun preloadStateOf(book: Book, src: String): String = when {
+        prefetching.containsKey(src) -> "running"
+        hasImageFile(book, src) -> "cached"
+        else -> "none"
+    }
+
+    /**
      * 预下载一张图：fire-and-forget，不阻塞 UI。
      *
      * 预加载器（`RecyclerViewPreloader`）原本只用 Glide 预热临时缓存，
@@ -788,16 +803,34 @@ object BookHelp {
      */
     fun prefetchImage(bookSource: BookSource?, book: Book, src: String) {
         if (src.isBlank()) return
-        if (prefetching.putIfAbsent(src, true) != null) return
+        if (prefetching.putIfAbsent(src, true) != null) {
+            //三级日志：重复触发被在途去重拦截（预取与显示关联排查用）
+            MangaPerfLog.v { "prefetch dup img=${MangaPerfLog.imgId(src)} flip=${MangaPerfLog.currentFlipId()}" }
+            return
+        }
+        val trace = if (MangaPerfLog.enabled) {
+            MangaPerfLog.Trace(
+                MangaPerfLog.imgId(src), MangaPerfLog.currentFlipId(), src = "prefetch"
+            ).apply { preState = "self" }
+        } else null
         prefetchScope.launch {
             try {
                 prefetchPermits.withPermit {
                     var attempt = 0
                     while (true) {
-                        if (ensureImage(bookSource, book, src) != ImageCacheResult.FAILED) {
+                        val result = ensureImage(bookSource, book, src, trace = trace)
+                        if (result != ImageCacheResult.FAILED) {
+                            trace?.out = if (result == ImageCacheResult.HIT) "hit" else "stored"
+                            MangaPerfLog.summary(trace)
+                            if (trace?.isSlow() == true) MangaPerfLog.detail(trace, "slow")
                             return@withPermit
                         }
-                        if (attempt++ >= PREFETCH_RETRY) return@withPermit
+                        trace?.fail("attempt${attempt + 1} failed")
+                        if (attempt++ >= PREFETCH_RETRY) {
+                            MangaPerfLog.summary(trace)
+                            MangaPerfLog.detail(trace, "fail")
+                            return@withPermit
+                        }
                         kotlinx.coroutines.delay(1000L * attempt)
                     }
                 }
@@ -805,6 +838,9 @@ object BookHelp {
                 throw e
             } catch (e: Exception) {
                 AppLog.put("漫画图片预下载失败\n${e.localizedMessage}")
+                trace?.fail(e.localizedMessage)
+                MangaPerfLog.summary(trace)
+                MangaPerfLog.detail(trace, "fail")
             } finally {
                 prefetching.remove(src)
             }
@@ -815,18 +851,29 @@ object BookHelp {
         bookSource: BookSource?,
         book: Book,
         chapter: BookChapter? = null,
+        trace: MangaPerfLog.Trace? = null,
     ) = PersistentImageCache(
-        store = BookImageStore(book),
-        isValidData = { checkImage(it) },
+        store = BookImageStore(book, trace),
+        isValidData = { bytes ->
+            val validateStart = if (trace != null) MangaPerfLog.nowNs() else 0L
+            val ok = checkImage(bytes)
+            if (trace != null) trace.validateMs = MangaPerfLog.msSince(validateStart)
+            ok
+        },
         fetch = { src ->
+            val netStart = if (trace != null) MangaPerfLog.nowNs() else 0L
             val bytes = AnalyzeUrl(
                 src, source = bookSource, coroutineContext = currentCoroutineContext()
             ).getByteArrayAwait()
+            if (trace != null) trace.netMs = MangaPerfLog.msSince(netStart)
             //只处理新网络字节，命中历史缓存不会再次执行书源解密。
             if (book.isImage) {
-                runScriptWithContext {
+                val decryptStart = if (trace != null) MangaPerfLog.nowNs() else 0L
+                val decoded = runScriptWithContext {
                     ImageUtils.decode(src, bytes, isCover = false, bookSource, book)
                 }
+                if (trace != null) trace.decryptMs = MangaPerfLog.msSince(decryptStart)
+                decoded
             } else {
                 bytes
             }
@@ -839,11 +886,18 @@ object BookHelp {
             AppLog.put("${book.name} ${chapter?.title} 图片 $src 下载失败\n${e.localizedMessage}", e)
         },
         onOptimizeFailed = { src, e ->
-            AppLog.put("${book.name} ${chapter?.title} 图片 $src 压缩失败，保留原图\n${e.localizedMessage}")
+            AppLog.put("${book.name} ${chapter?.title} 图片 $src 压缩失败，保留原图\n${e.localizedMessage}", e)
         },
         //压缩只在成功下载后执行；命中本地缓存时根本不会走到这里
         optimize = { bytes ->
-            withContext(IO) { optimizePermits.withPermit { optimizeImageBytes(bytes) } }
+            withContext(IO) {
+                optimizePermits.withPermit {
+                    val optimizeStart = if (trace != null) MangaPerfLog.nowNs() else 0L
+                    val result = optimizeImageBytes(bytes)
+                    if (trace != null) trace.optimizeMs = MangaPerfLog.msSince(optimizeStart)
+                    result
+                }
+            }
         },
     )
 
@@ -853,7 +907,10 @@ object BookHelp {
      * 删除坏文件时顺带撤销整本标记：标记只能代表「已验证的完整结果」，
      * 一旦发现图不可用就不再成立。
      */
-    private class BookImageStore(private val book: Book) : ImageStore {
+    private class BookImageStore(
+        private val book: Book,
+        private val trace: MangaPerfLog.Trace? = null,
+    ) : ImageStore {
 
         override fun exists(key: String): Boolean = BookHelp.getImage(book, key).exists()
 
@@ -867,8 +924,12 @@ object BookHelp {
             }
         }
 
-        override fun writeAtomic(key: String, bytes: ByteArray): Boolean =
-            BookHelp.writeImageAtomic(book, key, bytes)
+        override fun writeAtomic(key: String, bytes: ByteArray): Boolean {
+            val writeStart = if (trace != null) MangaPerfLog.nowNs() else 0L
+            val written = BookHelp.writeImageAtomic(book, key, bytes)
+            if (trace != null) trace.writeMs = MangaPerfLog.msSince(writeStart)
+            return written
+        }
     }
 
     /**
