@@ -47,8 +47,11 @@ class TocViewModel(application: Application) : BaseViewModel(application) {
             )
             appDb.bookDao.update(book)
             LocalBook.getChapterList(book).let {
-                appDb.bookChapterDao.delByBook(book.bookUrl)
-                appDb.bookChapterDao.insert(*it.toTypedArray())
+                // 目录替换原子化：删除与重插同事务，插入失败回滚保留原目录
+                appDb.runInTransaction {
+                    appDb.bookChapterDao.delByBook(book.bookUrl)
+                    appDb.bookChapterDao.insert(*it.toTypedArray())
+                }
                 ChapterTitleRegistry.update(book.bookUrl, it.map(BookChapter::title))
                 appDb.bookDao.update(book)
                 ReadBook.onChapterListUpdated(book)

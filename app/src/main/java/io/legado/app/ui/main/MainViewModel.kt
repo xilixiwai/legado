@@ -172,8 +172,11 @@ class MainViewModel(application: Application) : BaseViewModel(application) {
                 appDb.bookDao.replace(oldBook, book)
                 BookHelp.updateCacheFolder(oldBook, book)
             }
-            appDb.bookChapterDao.delByBook(bookUrl)
-            appDb.bookChapterDao.insert(*toc.toTypedArray())
+            // 目录替换原子化：删除与重插同事务，插入失败回滚保留原目录
+            appDb.runInTransaction {
+                appDb.bookChapterDao.delByBook(bookUrl)
+                appDb.bookChapterDao.insert(*toc.toTypedArray())
+            }
             ReadBook.onChapterListUpdated(book)
             addDownload(source, book)
         }.onFailure {

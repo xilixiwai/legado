@@ -73,8 +73,11 @@ class AudioPlayViewModel(application: Application) : BaseViewModel(application) 
             } else {
                 appDb.bookDao.replace(oldBook, book)
             }
-            appDb.bookChapterDao.delByBook(book.bookUrl)
-            appDb.bookChapterDao.insert(*cList.toTypedArray())
+            // 目录替换原子化：删除与重插同事务，插入失败回滚保留原目录
+            appDb.runInTransaction {
+                appDb.bookChapterDao.delByBook(book.bookUrl)
+                appDb.bookChapterDao.insert(*cList.toTypedArray())
+            }
             AudioPlay.chapterSize = cList.size
             AudioPlay.simulatedChapterSize = book.simulatedTotalChapterNum()
             AudioPlay.upDurChapter()

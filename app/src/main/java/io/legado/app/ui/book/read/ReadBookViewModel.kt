@@ -238,8 +238,11 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
                         index = book.durChapterIndex, pos = book.durChapterPos,
                         extra = "memIdx=${ReadBook.durChapterIndex} memPos=${ReadBook.durChapterPos} local=true"
                     )
-                    appDb.bookChapterDao.delByBook(book.bookUrl)
-                    appDb.bookChapterDao.insert(*it.toTypedArray())
+                    // 目录替换原子化：删除与重插同事务，插入失败回滚保留原目录
+                    appDb.runInTransaction {
+                        appDb.bookChapterDao.delByBook(book.bookUrl)
+                        appDb.bookChapterDao.insert(*it.toTypedArray())
+                    }
                     ChapterTitleRegistry.update(book.bookUrl, it.map(BookChapter::title))
                     appDb.bookDao.update(book)
                     ReadBook.onChapterListUpdated(book)
@@ -275,8 +278,11 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
                             appDb.bookDao.replace(oldBook, book)
                             BookHelp.updateCacheFolder(oldBook, book)
                         }
-                        appDb.bookChapterDao.delByBook(oldBook.bookUrl)
-                        appDb.bookChapterDao.insert(*cList.toTypedArray())
+                        // 目录替换原子化：删除与重插同事务，插入失败回滚保留原目录
+                        appDb.runInTransaction {
+                            appDb.bookChapterDao.delByBook(oldBook.bookUrl)
+                            appDb.bookChapterDao.insert(*cList.toTypedArray())
+                        }
                         ReadBook.onChapterListUpdated(book)
                         return true
                     }.onFailure {
