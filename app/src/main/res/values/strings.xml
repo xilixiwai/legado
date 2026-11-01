@@ -669,6 +669,7 @@
     <string name="manga_perf_verbose_t">Detailed manga perf log</string>
     <string name="manga_perf_verbose_s">Log every stage start/stop and prefetch task state for manga image loads (off by default)</string>
     <string name="log">Log</string>
+    <string name="menu_legacy_cache_migrate">Migrate legacy chapter cache</string>
     <string name="chinese_converter">Simplified conversion</string>
     <string name="change_icon_error">The icon is a vector icon, which was not supported before Android 8.0</string>
     <string name="aloud_config">Speech settings</string>

@@ -5,6 +5,9 @@ import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
+import android.widget.CheckBox
+import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.activity.viewModels
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.PopupMenu
@@ -25,6 +28,7 @@ import io.legado.app.data.entities.BookGroup
 import io.legado.app.databinding.ActivityCacheBookBinding
 import io.legado.app.databinding.DialogEditTextBinding
 import io.legado.app.databinding.DialogSelectSectionExportBinding
+import io.legado.app.help.book.ChapterCacheMigrator
 import io.legado.app.help.book.getExportFileName
 import io.legado.app.help.book.isAudio
 import io.legado.app.help.book.tryParesExportFileName
@@ -82,6 +86,8 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
     private val adapter by lazy { CacheAdapter(this, this) }
     private var booksFlowJob: Job? = null
     private var menu: Menu? = null
+    private var legacyScanDialog: AlertDialog? = null
+    private var legacyProgressDialog: AlertDialog? = null
     private val groupList: ArrayList<BookGroup> = arrayListOf()
     private var groupId: Long = -1
     private var scrollToTopAfterNextListUpdate = false
@@ -264,6 +270,7 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
             R.id.menu_export_type -> showExportTypeConfig()
             R.id.menu_export_charset -> showCharsetConfig()
             R.id.menu_log -> showDialogFragment<AppLogDialog>()
+            R.id.menu_legacy_cache_migrate -> alertLegacyCacheMigrate()
             else -> if (item.groupId == R.id.menu_group) {
                 binding.titleBar.subtitle = item.title
                 groupId = appDb.bookGroupDao.getByName(item.title.toString())?.groupId ?: 0
@@ -394,6 +401,136 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
             viewModel.cacheChapters[book.bookUrl]?.add(chapter.url)
             notifyItemChanged(book.bookUrl)
             resortIfNeeded()
+        }
+        observeLegacyMigration()
+    }
+
+    /**
+     * 旧版章节正文缓存迁移（用户主动触发）：扫描 → 预览统计 → 确认 → 执行 → 结果核实。
+     * 扫描只统计不修改文件；执行后台逐文件进行，取消粒度为书，单文件原子重命名。
+     */
+    private fun observeLegacyMigration() {
+        viewModel.legacyScanData.observe(this) { summary ->
+            legacyScanDialog?.dismiss()
+            showLegacyScanPreview(summary)
+        }
+        viewModel.legacyProgressData.observe(this) { progress ->
+            legacyProgressDialog?.setMessage(
+                "正在迁移:${progress.bookName}\n" +
+                    "进度 ${progress.done}/${progress.total}\n" +
+                    "成功 ${progress.renamed}  跳过 ${progress.skipped}  失败 ${progress.failed}"
+            )
+        }
+        viewModel.legacyDoneData.observe(this) { summary ->
+            legacyProgressDialog?.dismiss()
+            legacyProgressDialog = null
+            showLegacyMigrateResult(summary)
+        }
+    }
+
+    private fun alertLegacyCacheMigrate() {
+        alert("迁移旧版章节缓存") {
+            setMessage(
+                "将先扫描所有书籍的旧版章节正文缓存（00001-标题md5.nb 格式）。\n\n" +
+                    "扫描只统计、不修改任何文件；确认后仅迁移能够安全确认归属的缓存，" +
+                    "无法确认归属的一律保留，目标新缓存已存在时不覆盖。"
+            )
+            okButton {
+                legacyScanDialog = alert("扫描旧版缓存") {
+                    setMessage("正在扫描…")
+                    setCancelable(false)
+                }
+                viewModel.scanLegacyCache()
+            }
+            cancelButton()
+        }
+    }
+
+    private fun showLegacyScanPreview(summary: ChapterCacheMigrator.ScanSummary) {
+        if (summary.total == 0) {
+            alert("扫描完成") {
+                setMessage(
+                    "未发现旧版章节正文缓存，无需迁移。" +
+                        if (summary.nrFlagFiles > 0) {
+                            "\n\n另有 ${summary.nrFlagFiles} 个「去重标题」标记文件，已双键兼容生效，无需迁移。"
+                        } else {
+                            ""
+                        }
+                )
+                okButton()
+            }
+            return
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val pad = (resources.displayMetrics.density * 20).toInt()
+            setPadding(pad, pad / 2, pad, 0)
+        }
+        val tvStats = TextView(this).apply {
+            text = buildLegacyStatsText(summary)
+        }
+        container.addView(tvStats)
+        val cbMoved = CheckBox(this).apply {
+            text = "同时迁移序号不匹配的唯一候选（标题唯一且无其他候选，但序号与旧缓存不同；存在同名不同章的小概率风险）"
+        }
+        if (summary.uniqueMoved > 0) {
+            container.addView(cbMoved)
+        }
+        alert("扫描完成") {
+            customView { container }
+            positiveButton("开始迁移") {
+                showLegacyProgressDialog()
+                viewModel.startLegacyMigration(cbMoved.isChecked && summary.uniqueMoved > 0)
+            }
+            cancelButton()
+        }
+    }
+
+    private fun buildLegacyStatsText(summary: ChapterCacheMigrator.ScanSummary): String {
+        return buildString {
+            append("扫描书籍 ${summary.booksChecked} 本（有缓存目录 ${summary.booksWithCacheDir} 本）\n")
+            append("发现旧格式正文缓存 ${summary.total} 个：\n")
+            append("· 可安全迁移（标题唯一且序号匹配）：${summary.safe}\n")
+            append("· 唯一候选但序号不匹配（默认不迁移）：${summary.uniqueMoved}\n")
+            append("· 目标新缓存已存在（不覆盖）：${summary.targetExists}\n")
+            append("· 重复标题章节（保留防串章）：${summary.duplicateKept}\n")
+            append("· 已是新键无需处理：${summary.alreadyNew}\n")
+            append("· 无法确认归属（竞争候选/孤儿）：${summary.ambiguous + summary.orphan}\n")
+            append("· 空文件或异常：${summary.invalid}\n")
+            if (summary.nrFlagFiles > 0) {
+                append("· 「去重标题」标记文件 ${summary.nrFlagFiles} 个：已双键兼容，无需迁移\n")
+            }
+            if (summary.deletedBookDirs > 0) {
+                append("· 已删除书籍的缓存目录 ${summary.deletedBookDirs} 个：不处理\n")
+            }
+        }
+    }
+
+    private fun showLegacyProgressDialog() {
+        legacyProgressDialog = alert("迁移旧版缓存") {
+            setMessage("正在迁移…")
+            cancelButton {
+                viewModel.cancelLegacyMigration()
+            }
+        }
+    }
+
+    private fun showLegacyMigrateResult(summary: ChapterCacheMigrator.ScanSummary) {
+        alert("迁移结果") {
+            setMessage(
+                "迁移完成，已重新扫描核实磁盘状态。\n\n" +
+                    "剩余旧格式正文缓存 ${summary.total} 个：\n" +
+                    "· 可安全迁移：${summary.safe}\n" +
+                    "· 唯一候选但序号不匹配（默认不迁移）：${summary.uniqueMoved}\n" +
+                    "· 目标新缓存已存在（不覆盖）：${summary.targetExists}\n" +
+                    "· 重复标题章节（保留防串章）：${summary.duplicateKept}\n" +
+                    "· 已是新键无需处理：${summary.alreadyNew}\n" +
+                    "· 无法确认归属（竞争候选/孤儿）：${summary.ambiguous + summary.orphan}\n" +
+                    "· 空文件或异常：${summary.invalid}\n\n" +
+                    "迁移或跳过的执行明细以扫描预览后的实时进度为准；" +
+                    "无法确认归属的文件已全部保留，可重新打开本入口继续扫描处理。"
+            )
+            okButton()
         }
     }
 

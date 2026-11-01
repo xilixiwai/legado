@@ -112,4 +112,9 @@
         android:title="@string/log"
         app:showAsAction="never" />
 
+    <item
+        android:id="@+id/menu_legacy_cache_migrate"
+        android:title="@string/menu_legacy_cache_migrate"
+        app:showAsAction="never" />
+
 </menu>
