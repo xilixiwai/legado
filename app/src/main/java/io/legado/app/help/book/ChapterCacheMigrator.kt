@@ -113,6 +113,30 @@ object ChapterCacheMigrator {
     )
 
     /**
+     * 扫描预览的统计文本（预览对话框显示与「复制扫描结果」同源，保证复制内容与所见一致）。
+     * 仅做结果呈现，不参与扫描与迁移逻辑。
+     */
+    fun buildScanReportText(summary: ScanSummary): String {
+        return buildString {
+            append("扫描书籍 ${summary.booksChecked} 本（有缓存目录 ${summary.booksWithCacheDir} 本）\n")
+            append("发现旧格式正文缓存 ${summary.total} 个：\n")
+            append("· 可安全迁移（标题唯一且序号匹配）：${summary.safe}\n")
+            append("· 唯一候选但序号不匹配（默认不迁移）：${summary.uniqueMoved}\n")
+            append("· 目标新缓存已存在（不覆盖）：${summary.targetExists}\n")
+            append("· 重复标题章节（保留防串章）：${summary.duplicateKept}\n")
+            append("· 已是新键无需处理：${summary.alreadyNew}\n")
+            append("· 无法确认归属（竞争候选/孤儿）：${summary.ambiguous + summary.orphan}\n")
+            append("· 空文件或异常：${summary.invalid}\n")
+            if (summary.nrFlagFiles > 0) {
+                append("· 「去重标题」标记文件 ${summary.nrFlagFiles} 个：已双键兼容，无需迁移\n")
+            }
+            if (summary.deletedBookDirs > 0) {
+                append("· 已删除书籍的缓存目录 ${summary.deletedBookDirs} 个：不处理\n")
+            }
+        }
+    }
+
+    /**
      * 扫描单本书：只读磁盘与章节列表，不修改任何文件。
      * 会以传入章节列表刷新 [ChapterTitleRegistry]，保证目标名与 BookHelp 写入侧一致。
      */

@@ -13,6 +13,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.PopupMenu
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
+import com.google.android.material.button.MaterialButton
 import com.google.android.material.textfield.TextInputLayout
 import io.legado.app.R
 import io.legado.app.base.VMBaseActivity
@@ -53,6 +54,7 @@ import io.legado.app.utils.iconItemOnLongClick
 import io.legado.app.utils.isContentScheme
 import io.legado.app.utils.observeEvent
 import io.legado.app.utils.setIconCompat
+import io.legado.app.utils.sendToClip
 import io.legado.app.utils.showDialogFragment
 import io.legado.app.utils.startActivityForBook
 import io.legado.app.utils.startService
@@ -467,9 +469,17 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
             setPadding(pad, pad / 2, pad, 0)
         }
         val tvStats = TextView(this).apply {
-            text = buildLegacyStatsText(summary)
+            text = ChapterCacheMigrator.buildScanReportText(summary)
         }
         container.addView(tvStats)
+        val btnCopy = MaterialButton(this).apply {
+            text = "复制扫描结果"
+            setOnClickListener {
+                // 复制内容与预览显示同源；sendToClip 自带「已复制」提示
+                sendToClip("旧版章节缓存扫描结果\n${ChapterCacheMigrator.buildScanReportText(summary)}")
+            }
+        }
+        container.addView(btnCopy)
         val cbMoved = CheckBox(this).apply {
             text = "同时迁移序号不匹配的唯一候选（标题唯一且无其他候选，但序号与旧缓存不同；存在同名不同章的小概率风险）"
         }
@@ -483,26 +493,6 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
                 viewModel.startLegacyMigration(cbMoved.isChecked && summary.uniqueMoved > 0)
             }
             cancelButton()
-        }
-    }
-
-    private fun buildLegacyStatsText(summary: ChapterCacheMigrator.ScanSummary): String {
-        return buildString {
-            append("扫描书籍 ${summary.booksChecked} 本（有缓存目录 ${summary.booksWithCacheDir} 本）\n")
-            append("发现旧格式正文缓存 ${summary.total} 个：\n")
-            append("· 可安全迁移（标题唯一且序号匹配）：${summary.safe}\n")
-            append("· 唯一候选但序号不匹配（默认不迁移）：${summary.uniqueMoved}\n")
-            append("· 目标新缓存已存在（不覆盖）：${summary.targetExists}\n")
-            append("· 重复标题章节（保留防串章）：${summary.duplicateKept}\n")
-            append("· 已是新键无需处理：${summary.alreadyNew}\n")
-            append("· 无法确认归属（竞争候选/孤儿）：${summary.ambiguous + summary.orphan}\n")
-            append("· 空文件或异常：${summary.invalid}\n")
-            if (summary.nrFlagFiles > 0) {
-                append("· 「去重标题」标记文件 ${summary.nrFlagFiles} 个：已双键兼容，无需迁移\n")
-            }
-            if (summary.deletedBookDirs > 0) {
-                append("· 已删除书籍的缓存目录 ${summary.deletedBookDirs} 个：不处理\n")
-            }
         }
     }
 

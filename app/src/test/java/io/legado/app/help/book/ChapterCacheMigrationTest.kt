@@ -406,6 +406,58 @@ class ChapterCacheMigrationTest {
         assertTrue(File(dir, ch("第一章", 0).getFileName()).exists())
     }
 
+    // ============================================================================================
+    // 扫描报告文本（预览显示与复制功能同源）
+    // ============================================================================================
+
+    @Test
+    fun `扫描报告文本包含全部分类计数且可核对合计`() {
+        val dir = tmp.newFolder("book1")
+        val chapters = listOf(ch("第一章", 0), ch("第二章", 1), ch("A", 5), ch("A", 8))
+        writeLegacy(dir, "第一章", 0, "c0")                       // A：可安全迁移
+        writeLegacy(dir, "第二章", 9, "c9")                       // B：唯一候选 index 不匹配
+        writeLegacy(dir, "A", 5, "a5")                            // 已是新键（与 twin@5 的键位一致）
+        writeLegacy(dir, "A", 8, "a8")                            // 已是新键（与 twin@8 的键位一致）
+        writeLegacy(dir, "A", 2, "a2")                            // 重复保留（不匹配任何 twin 的 index）
+        writeLegacy(dir, "旧标题", 2, "old")                      // 孤儿
+        File(dir, legacyName("第三章", 3)).writeText("")          // 异常：空文件
+        val plan = ChapterCacheMigrator.plan("book1", "书一", dir, chapters)
+        val summary = ChapterCacheMigrator.ScanSummary(
+            booksChecked = 1, booksWithCacheDir = 1,
+            deletedBookDirs = 0, nrFlagFiles = 0, bookPlans = listOf(plan)
+        )
+        val text = ChapterCacheMigrator.buildScanReportText(summary)
+        assertTrue(text.contains("扫描书籍 1 本"))
+        assertTrue(text.contains("发现旧格式正文缓存 7 个"))
+        assertTrue(text.contains("可安全迁移（标题唯一且序号匹配）：1"))
+        assertTrue(text.contains("唯一候选但序号不匹配（默认不迁移）：1"))
+        assertTrue(text.contains("重复标题章节（保留防串章）：1"))
+        assertTrue(text.contains("已是新键无需处理：2"))
+        assertTrue(text.contains("无法确认归属（竞争候选/孤儿）：1"))
+        assertTrue(text.contains("空文件或异常：1"))
+        // 分类互斥，各类之和等于总数（复制给外部分析时可核对口径）
+        assertEquals(
+            plan.total,
+            plan.safe + plan.uniqueMoved + plan.targetExists + plan.duplicateKept +
+                plan.alreadyNew + plan.ambiguous + plan.orphan + plan.invalid
+        )
+        // 无 nr 标记、无已删书目录时不展示对应行
+        assertFalse(text.contains("去重标题"))
+        assertFalse(text.contains("已删除书籍"))
+    }
+
+    @Test
+    fun `扫描报告文本按需展示nr与已删书目录说明`() {
+        val summary = ChapterCacheMigrator.ScanSummary(
+            booksChecked = 3, booksWithCacheDir = 2,
+            deletedBookDirs = 1, nrFlagFiles = 4, bookPlans = emptyList()
+        )
+        val text = ChapterCacheMigrator.buildScanReportText(summary)
+        assertTrue(text.contains("「去重标题」标记文件 4 个"))
+        assertTrue(text.contains("已删除书籍的缓存目录 1 个"))
+        assertTrue(text.contains("发现旧格式正文缓存 0 个"))
+    }
+
     private fun assertNotEquals(a: Any, b: Any) {
         assertFalse("expected different values", a == b)
     }
