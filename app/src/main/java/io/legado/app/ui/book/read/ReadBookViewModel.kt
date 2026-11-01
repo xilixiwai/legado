@@ -17,6 +17,7 @@ import io.legado.app.data.entities.BookProgress
 import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.AppWebDav
 import io.legado.app.help.book.BookHelp
+import io.legado.app.help.book.ChapterTitleRegistry
 import io.legado.app.help.book.ContentProcessor
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.isLocalModified
@@ -239,6 +240,7 @@ class ReadBookViewModel(application: Application) : BaseViewModel(application) {
                     )
                     appDb.bookChapterDao.delByBook(book.bookUrl)
                     appDb.bookChapterDao.insert(*it.toTypedArray())
+                    ChapterTitleRegistry.update(book.bookUrl, it.map(BookChapter::title))
                     appDb.bookDao.update(book)
                     ReadBook.onChapterListUpdated(book)
                 }

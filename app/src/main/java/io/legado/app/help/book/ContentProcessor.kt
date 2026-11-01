@@ -79,6 +79,15 @@ class ContentProcessor private constructor(
         removeSameTitleCache.addAll(files)
     }
 
+    /**
+     * 该章节是否禁用了「去除重复标题」。
+     * 新旧两种标记文件名任一在列即视为禁用，兼容升级前按旧格式写入的标记文件。
+     */
+    fun isRemoveSameTitleDisabled(chapter: BookChapter): Boolean {
+        return removeSameTitleCache.contains(chapter.getFileName("nr")) ||
+            removeSameTitleCache.contains(chapter.getLegacyFileName("nr"))
+    }
+
     fun getTitleReplaceRules(): List<ReplaceRule> {
         return titleReplaceRules
     }
@@ -102,8 +111,7 @@ class ContentProcessor private constructor(
         var effectiveReplaceRules: ArrayList<ReplaceRule>? = null
         if (content != "null") {
             //去除重复标题
-            val fileName = chapter.getFileName("nr")
-            if (!removeSameTitleCache.contains(fileName)) try {
+            if (!isRemoveSameTitleDisabled(chapter)) try {
                 val name = Pattern.quote(book.name)
                 var title = chapter.title.escapeRegex().replace(spaceRegex, "\\\\s*")
                 var matcher = Pattern.compile("^(\\s|\\p{P}|${name})*${title}(\\s)*")

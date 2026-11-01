@@ -11,6 +11,7 @@ import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.rule.TocRule
 import io.legado.app.exception.NoStackTraceException
 import io.legado.app.exception.TocEmptyException
+import io.legado.app.help.book.ChapterTitleRegistry
 import io.legado.app.help.book.ContentProcessor
 import io.legado.app.help.book.simulatedTotalChapterNum
 import io.legado.app.help.config.AppConfig
@@ -150,6 +151,9 @@ object BookChapterList {
                 }
             }
         }
+        // 正文缓存键依据：以最终目录（含 formatJs 处理后的标题）刷新重复标题注册表，
+        // 使目录刷新重排后新缓存键立刻按最新目录计算。仅刷新内存判定，不迁移任何缓存文件。
+        ChapterTitleRegistry.update(book.bookUrl, list.map { it.title })
         val replaceRules = ContentProcessor.get(book).getTitleReplaceRules()
         book.durChapterTitle = list.getOrElse(book.durChapterIndex) { list.last() }
             .getDisplayTitle(replaceRules, book.getUseReplaceRule())

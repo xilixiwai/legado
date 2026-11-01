@@ -203,6 +203,8 @@ class SearchContentActivity :
                     ensureActive()
                     val searchResults = if (isLocalBook
                         || viewModel.cacheChapterNames.contains(bookChapter.getFileName())
+                        // 旧格式缓存也存在时同样可搜索，与 hasContent 口径一致
+                        || viewModel.cacheChapterNames.contains(bookChapter.getLegacyFileName())
                     ) {
                         viewModel.searchChapter(query, bookChapter)
                     } else {

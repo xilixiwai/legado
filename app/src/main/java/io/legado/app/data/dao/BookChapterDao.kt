@@ -31,6 +31,10 @@ interface BookChapterDao {
     @Query("select count(url) from chapters where bookUrl = :bookUrl")
     fun getChapterCount(bookUrl: String): Int
 
+    // 只取标题列：供 ChapterTitleRegistry 计算重复标题（缓存键判定用），避免整表实体开销
+    @Query("select title from chapters where bookUrl = :bookUrl")
+    fun getChapterTitles(bookUrl: String): List<String>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     fun insert(vararg bookChapter: BookChapter)
 

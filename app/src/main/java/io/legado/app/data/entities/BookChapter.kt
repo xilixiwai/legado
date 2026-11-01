@@ -11,6 +11,7 @@ import io.legado.app.constant.AppPattern
 import io.legado.app.data.appDb
 import io.legado.app.exception.RegexTimeoutException
 import io.legado.app.help.RuleBigDataHelp
+import io.legado.app.help.book.ChapterTitleRegistry
 import io.legado.app.help.config.AppConfig
 import io.legado.app.model.analyzeRule.AnalyzeUrl
 import io.legado.app.model.analyzeRule.RuleDataInterface
@@ -159,9 +160,31 @@ data class BookChapter(
         }
     }
 
+    /**
+     * 当前生效的正文缓存文件名。
+     *
+     * 新策略：标题在当前目录中唯一时不再包含 index——目录刷新重排、章节 URL 变化都不会
+     * 再使缓存失效；标题完全重复时保留 index 前缀区分，避免同名章节互相覆盖（串章）。
+     * 重复判定统一走 [ChapterTitleRegistry]，保证所有缓存调用点口径一致；
+     * 注册表不可用时保守按重复处理（等价旧格式，宁可缓存不命中也不串章）。
+     */
+    @SuppressLint("DefaultLocale")
+    fun getFileName(suffix: String = "nb"): String {
+        ensureTitleMD5Init()
+        return if (ChapterTitleRegistry.isTitleDuplicate(bookUrl, title)) {
+            String.format("%05d-%s.%s", index, titleMD5, suffix)
+        } else {
+            String.format("%s.%s", titleMD5, suffix)
+        }
+    }
+
+    /**
+     * 旧版缓存文件名（`%05d-index-titleMD5.suffix`）。
+     * 仅供旧缓存兼容读取与显式删除使用，新写入一律走 [getFileName]。
+     */
     @SuppressLint("DefaultLocale")
     @Suppress("unused")
-    fun getFileName(suffix: String = "nb"): String {
+    fun getLegacyFileName(suffix: String = "nb"): String {
         ensureTitleMD5Init()
         return String.format("%05d-%s.%s", index, titleMD5, suffix)
     }

@@ -30,7 +30,11 @@ class CacheViewModel(application: Application) : BaseViewModel(application) {
                         appDb.bookChapterDao.getChapterList(book.bookUrl).also {
                             book.totalChapterNum = it.size
                         }.forEach { chapter ->
-                            if (cacheNames.contains(chapter.getFileName()) || chapter.isVolume) {
+                            // 新/旧缓存键任一命中即视为已缓存，与 hasContent 口径一致
+                            if (cacheNames.contains(chapter.getFileName())
+                                || cacheNames.contains(chapter.getLegacyFileName())
+                                || chapter.isVolume
+                            ) {
                                 chapterCaches.add(chapter.url)
                             }
                         }

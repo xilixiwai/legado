@@ -19,6 +19,7 @@ import io.legado.app.data.entities.BookChapter
 import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.AppWebDav
 import io.legado.app.help.book.BookHelp
+import io.legado.app.help.book.ChapterTitleRegistry
 import io.legado.app.help.book.ContentProcessor
 import io.legado.app.help.book.getExportFileName
 import io.legado.app.help.book.isLocalModified
@@ -221,6 +222,7 @@ class ExportBookService : BaseService() {
         }.onSuccess {
             appDb.bookChapterDao.delByBook(book.bookUrl)
             appDb.bookChapterDao.insert(*it.toTypedArray())
+            ChapterTitleRegistry.update(book.bookUrl, it.map(BookChapter::title))
             appDb.bookDao.update(book)
             ReadBook.onChapterListUpdated(book)
         }

@@ -1047,6 +1047,8 @@ object BookHelp {
 
     /**
      * 检测该章节是否下载
+     *
+     * 与 [getContent] 读取口径一致：新缓存键命中，或旧格式缓存仍存在，都算已缓存。
      */
     fun hasContent(book: Book, bookChapter: BookChapter): Boolean {
         return if (book.isLocalTxt ||
@@ -1054,11 +1056,11 @@ object BookHelp {
         ) {
             true
         } else {
-            downloadDir.exists(
-                cacheFolderName,
-                book.getFolderName(),
-                bookChapter.getFileName()
-            )
+            resolveChapterCacheFile(
+                contentDir(book),
+                bookChapter.getFileName(),
+                bookChapter.getLegacyFileName()
+            ) != null
         }
     }
 
@@ -1092,14 +1094,18 @@ object BookHelp {
 
     /**
      * 读取章节内容
+     *
+     * 缓存键策略：优先按新缓存键（标题唯一时不含 index）读取；未命中时按当前
+     * index + titleMD5 兼容读取旧格式缓存。兼容读取只读不迁移：不重命名、不复制、
+     * 不删除旧文件，新写入始终使用 [BookChapter.getFileName] 的新键。
      */
     fun getContent(book: Book, bookChapter: BookChapter): String? {
-        val file = downloadDir.getFile(
-            cacheFolderName,
-            book.getFolderName(),
-            bookChapter.getFileName()
+        val file = resolveChapterCacheFile(
+            contentDir(book),
+            bookChapter.getFileName(),
+            bookChapter.getLegacyFileName()
         )
-        if (file.exists()) {
+        if (file != null) {
             val string = file.readText()
             if (string.isEmpty()) {
                 return null
@@ -1118,32 +1124,44 @@ object BookHelp {
 
     /**
      * 删除章节内容
+     *
+     * 新旧两种文件名都删，避免显式删除章节缓存后旧格式文件残留；
+     * 仅删除当前章节对应的确切文件名，不涉及任何批量清理。
      */
     fun delContent(book: Book, bookChapter: BookChapter) {
-        FileUtils.createFileIfNotExist(
-            downloadDir,
-            cacheFolderName,
-            book.getFolderName(),
-            bookChapter.getFileName()
-        ).delete()
+        deleteChapterCacheFiles(
+            contentDir(book),
+            bookChapter.getFileName(),
+            bookChapter.getLegacyFileName()
+        )
+    }
+
+    /** 单本书的正文缓存目录（缓存键判定辅助，避免每处重复拼路径） */
+    private fun contentDir(book: Book): File {
+        return downloadDir.getFile(cacheFolderName, book.getFolderName())
     }
 
     /**
      * 设置是否禁用正文的去除重复标题,针对单个章节
      */
     fun setRemoveSameTitle(book: Book, bookChapter: BookChapter, removeSameTitle: Boolean) {
-        val fileName = bookChapter.getFileName("nr")
         val contentProcessor = ContentProcessor.get(book)
         if (removeSameTitle) {
-            val path = FileUtils.getPath(
-                downloadDir,
-                cacheFolderName,
-                book.getFolderName(),
-                fileName
-            )
-            contentProcessor.removeSameTitleCache.remove(fileName)
-            File(path).delete()
+            // 新旧标记文件都清理，否则旧格式标记残留会让本章节的设置看似不生效
+            hashSetOf(
+                bookChapter.getFileName("nr"),
+                bookChapter.getLegacyFileName("nr")
+            ).forEach { name ->
+                FileUtils.getPath(
+                    downloadDir,
+                    cacheFolderName,
+                    book.getFolderName(),
+                    name
+                ).let(::File).delete()
+                contentProcessor.removeSameTitleCache.remove(name)
+            }
         } else {
+            val fileName = bookChapter.getFileName("nr")
             FileUtils.createFileIfNotExist(
                 downloadDir,
                 cacheFolderName,
@@ -1158,13 +1176,27 @@ object BookHelp {
      * 获取是否去除重复标题
      */
     fun removeSameTitle(book: Book, bookChapter: BookChapter): Boolean {
-        val path = FileUtils.getPath(
-            downloadDir,
-            cacheFolderName,
-            book.getFolderName(),
-            bookChapter.getFileName("nr")
-        )
-        return !File(path).exists()
+        val fileName = bookChapter.getFileName("nr")
+        if (FileUtils.getPath(
+                downloadDir,
+                cacheFolderName,
+                book.getFolderName(),
+                fileName
+            ).let(::File).exists()
+        ) {
+            return false
+        }
+        // 旧格式标记文件仍存在时同样视为已禁用，与读取侧口径一致
+        val legacyName = bookChapter.getLegacyFileName("nr")
+        if (legacyName != fileName) {
+            return !FileUtils.getPath(
+                downloadDir,
+                cacheFolderName,
+                book.getFolderName(),
+                legacyName
+            ).let(::File).exists()
+        }
+        return true
     }
 
     /**
@@ -1304,4 +1336,47 @@ object BookHelp {
             .replace(regexOther, "")
     }
 
+}
+
+/**
+ * 章节正文缓存文件解析：新缓存键优先，未命中时兼容读取旧格式文件。
+ *
+ * 抽成独立纯函数是为了用真实文件读写做单元测试；同名（如重复标题章节新旧键相同）时
+ * 只看新键一次。只做读取，不重命名、不复制、不删除。
+ */
+internal fun resolveChapterCacheFile(dir: File, currentName: String, legacyName: String): File? {
+    val current = File(dir, currentName)
+    if (current.exists()) return current
+    if (legacyName != currentName) {
+        val legacy = File(dir, legacyName)
+        if (legacy.exists()) return legacy
+    }
+    return null
+}
+
+/**
+ * 删除章节正文缓存：新旧两种文件名都删，避免显式删除后旧格式文件残留；
+ * 只删除传入的确切文件名，不扫描目录、不做批量清理。
+ */
+internal fun deleteChapterCacheFiles(dir: File, currentName: String, legacyName: String) {
+    File(dir, currentName).delete()
+    if (legacyName != currentName) {
+        File(dir, legacyName).delete()
+    }
+}
+
+/**
+ * 章节列表缓存标记归一：磁盘文件与新/旧缓存键任一匹配，即视为该章节已缓存，
+ * 统一返回当前缓存键集合。供目录列表等 UI 标记使用，保证与 hasContent 口径一致。
+ */
+internal fun matchChapterCacheNames(files: Set<String>, chapters: List<BookChapter>): Set<String> {
+    val names = hashSetOf<String>()
+    chapters.forEach { chapter ->
+        if (files.contains(chapter.getFileName())
+            || files.contains(chapter.getLegacyFileName())
+        ) {
+            names.add(chapter.getFileName())
+        }
+    }
+    return names
 }

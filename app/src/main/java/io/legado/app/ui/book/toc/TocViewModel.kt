@@ -9,7 +9,9 @@ import io.legado.app.base.BaseViewModel
 import io.legado.app.constant.AppLog
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.Book
+import io.legado.app.data.entities.BookChapter
 import io.legado.app.exception.NoStackTraceException
+import io.legado.app.help.book.ChapterTitleRegistry
 import io.legado.app.model.ReadBook
 import io.legado.app.model.localBook.LocalBook
 import io.legado.app.utils.FileDoc
@@ -47,6 +49,7 @@ class TocViewModel(application: Application) : BaseViewModel(application) {
             LocalBook.getChapterList(book).let {
                 appDb.bookChapterDao.delByBook(book.bookUrl)
                 appDb.bookChapterDao.insert(*it.toTypedArray())
+                ChapterTitleRegistry.update(book.bookUrl, it.map(BookChapter::title))
                 appDb.bookDao.update(book)
                 ReadBook.onChapterListUpdated(book)
                 bookData.postValue(book)

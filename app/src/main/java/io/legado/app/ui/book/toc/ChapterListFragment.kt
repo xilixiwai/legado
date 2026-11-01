@@ -17,6 +17,7 @@ import io.legado.app.data.entities.BookChapter
 import io.legado.app.databinding.FragmentChapterListBinding
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.isLocal
+import io.legado.app.help.book.matchChapterCacheNames
 import io.legado.app.help.book.simulatedTotalChapterNum
 import io.legado.app.lib.theme.bottomBackground
 import io.legado.app.lib.theme.getPrimaryTextColor
@@ -91,7 +92,11 @@ class ChapterListFragment : VMBaseFragment<TocViewModel>(R.layout.fragment_chapt
 
     private fun initCacheFileNames(book: Book) {
         lifecycleScope.launch(IO) {
-            adapter.cacheFileNames.addAll(BookHelp.getChapterFiles(book))
+            // 磁盘文件与章节的新/旧缓存键匹配归一后再标记，与 hasContent 口径一致：
+            // 旧格式缓存存在也显示已缓存，孤立旧文件（index 已变）不会误标其他章节
+            val files = BookHelp.getChapterFiles(book)
+            val chapters = appDb.bookChapterDao.getChapterList(book.bookUrl)
+            adapter.cacheFileNames.addAll(matchChapterCacheNames(files, chapters))
             withContext(Main) {
                 adapter.notifyItemRangeChanged(0, adapter.itemCount, true)
             }
