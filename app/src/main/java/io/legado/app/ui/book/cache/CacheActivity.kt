@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
+import android.widget.Button
 import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -13,7 +14,6 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.PopupMenu
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
-import com.google.android.material.button.MaterialButton
 import com.google.android.material.textfield.TextInputLayout
 import io.legado.app.R
 import io.legado.app.base.VMBaseActivity
@@ -472,7 +472,7 @@ class CacheActivity : VMBaseActivity<ActivityCacheBookBinding, CacheViewModel>()
             text = ChapterCacheMigrator.buildScanReportText(summary)
         }
         container.addView(tvStats)
-        val btnCopy = MaterialButton(this).apply {
+        val btnCopy = Button(this).apply {
             text = "复制扫描结果"
             setOnClickListener {
                 // 复制内容与预览显示同源；sendToClip 自带「已复制」提示
