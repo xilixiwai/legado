@@ -14,6 +14,7 @@ import io.legado.app.help.globalExecutor
 import splitties.init.appCtx
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.concurrent.CancellationException
 import java.util.logging.FileHandler
 import java.util.logging.Level
 import java.util.logging.LogRecord
@@ -142,5 +143,35 @@ object LogUtils {
 fun Throwable.printOnDebug() {
     if (BuildConfig.DEBUG) {
         printStackTrace()
+    }
+}
+
+/**
+ * 判定协程异常是否属于「未被业务处理」需要记录：
+ * - 正常取消（CancellationException，含超时取消与主动取消 ActivelyCancelException）不是错误，不记录；
+ * - 已挂 onError 回调的异常由回调各自处理（多数会自行 AppLog），这里不重复记录。
+ */
+fun Throwable.shouldLogAsUnhandled(hasErrorCallback: Boolean): Boolean {
+    if (this is CancellationException) {
+        return false
+    }
+    return !hasErrorCallback
+}
+
+/**
+ * 协程异常的统一兜底记录：Debug 构建保持原有行为（printOnDebug 标准堆栈输出），不重复记录；
+ * Release 构建下为未挂 onError 且未被 onErrorReturn 消化的异常计入 AppLog，
+ * 避免异常完全静默（修复前 printOnDebug 在 release 是空操作）。
+ * 只记录异常类名、消息与堆栈（AppLog 既有惯例），不记录请求头、密码或响应内容。
+ */
+fun Throwable.logIfUnhandled(hasErrorCallback: Boolean) {
+    if (BuildConfig.DEBUG) {
+        return
+    }
+    if (!shouldLogAsUnhandled(hasErrorCallback)) {
+        return
+    }
+    runCatching {
+        AppLog.put("协程异常未处理\n$this", this)
     }
 }

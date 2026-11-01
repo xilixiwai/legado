@@ -1,5 +1,6 @@
 package io.legado.app.help.coroutine
 
+import io.legado.app.utils.logIfUnhandled
 import io.legado.app.utils.printOnDebug
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletionHandler
@@ -186,6 +187,9 @@ class Coroutine<T>(
                     true
                 } ?: false
                 if (!consume) {
+                    // 未挂 onError 的异常在 release 下原本完全静默，统一兜底计入 AppLog；
+                    // 取消（CancellationException）与已有 onError 的异常不记录
+                    e.logIfUnhandled(hasErrorCallback = error != null)
                     error?.let { dispatchCallback(this, e, it) }
                 }
             } finally {
