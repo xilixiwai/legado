@@ -34,6 +34,11 @@ suspend fun OkHttpClient.newCallResponse(
     requestBuilder.apply(builder)
     var response: Response? = null
     for (i in 0..retry) {
+        // 上一轮非 2xx 的中间响应不会返回给调用方，先关闭释放连接再重试；
+        // 成功响应已提前 return，最终返回值（成功或重试耗尽的最后一次）仍归调用方关闭
+        response?.let { previous ->
+            runCatching { previous.close() }
+        }
         response = newCall(requestBuilder.build()).await()
         if (response.isSuccessful) {
             return response
