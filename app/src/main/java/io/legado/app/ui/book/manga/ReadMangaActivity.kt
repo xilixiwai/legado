@@ -371,6 +371,9 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
 
     override fun onResume() {
         super.onResume()
+        // 与 ReadBookActivity.onResume 对齐:每次回到前台重锚计时起点,
+        // 避免后台/锁屏/切书期间的墙上时间在下一次翻页时被整段计入阅读时长
+        ReadManga.readStartTime = System.currentTimeMillis()
         networkChangedListener.register()
         networkChangedListener.onNetworkChanged = {
             // 当网络是可用状态且无需初始化时同步进度（初始化中已有同步进度逻辑）
