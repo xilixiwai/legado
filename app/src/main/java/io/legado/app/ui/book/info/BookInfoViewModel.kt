@@ -402,12 +402,22 @@ class BookInfoViewModel(application: Application) : BaseViewModel(application) {
                 oldBook?.delete()
                 appDb.bookDao.insert(book)
                 appDb.bookChapterDao.insert(*toc.toTypedArray())
-                // 换源后书名/作者变化时，把本机阅读统计迁移到新身份，保持同一本书统计连续；
-                // 迁移失败只记日志，不影响换源主流程
-                oldBook?.let {
-                    ReadRecordDetailHelper.migrateBookIdentity(
-                        it.name, it.author, book.name, book.author
-                    )
+                oldBook?.let { old ->
+                    val oldName = old.name
+                    val oldAuthor = old.author
+                    // 与计时结算同一单线程队列（FIFO）：先结算旧身份的在途窗口、
+                    // 冲正此前事务失败的待重试窗口，再迁移身份——保证旧身份的最后一笔
+                    // 计时先于迁移落库；迁移成功后注册身份重定向，之后持有旧书籍对象的
+                    // 结算（如朗读切章）仍自动归入新身份，旧身份不再接收计时。
+                    // 迁移失败自动入重试队列，随后续结算重试，不影响换源主流程。
+                    ReadBook.executor.execute {
+                        ReadBook.settleInFlightIfReading(old.bookUrl)
+                        ReadManga.settleInFlightIfReading(old.bookUrl)
+                        ReadRecordDetailHelper.retryPendingWork()
+                        ReadRecordDetailHelper.migrateBookIdentity(
+                            oldName, oldAuthor, book.name, book.author
+                        )
+                    }
                 }
             }
             bookData.postValue(book)

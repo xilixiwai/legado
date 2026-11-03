@@ -72,7 +72,9 @@ object ReadManga : CoroutineScope by MainScope() {
     fun resetData(book: Book) {
         ReadManga.book = book
         readRecord.bookName = book.name
-        readRecord.readTime = appDb.readRecordDao.getReadTime(book.name) ?: 0
+        // 只取本机分区（deviceId 为空串）作计时基数：其他设备分区的行是其他设备的书籍副本，
+        // 参与基数会造成每次结算后累计逐次膨胀
+        readRecord.readTime = appDb.readRecordDao.getOwnReadTime(book.name) ?: 0
         chapterSize = appDb.bookChapterDao.getChapterCount(book.bookUrl)
         simulatedChapterSize = if (book.readSimulating()) {
             book.simulatedTotalChapterNum()
@@ -133,21 +135,61 @@ object ReadManga : CoroutineScope by MainScope() {
             if (!AppConfig.enableReadRecord) {
                 return@execute
             }
-            val windowStart = readStartTime
-            val now = System.currentTimeMillis()
-            readRecord.readTime = readRecord.readTime + now - windowStart
-            readStartTime = now
-            readRecord.lastRead = now
-            val book = this.book
-            runCatching {
-                appDb.runInTransaction {
-                    appDb.readRecordDao.insert(readRecord)
-                    // 每日明细与累计表同事务写入，任一失败整体回滚
-                    ReadRecordDetailHelper.appendWindow(book, windowStart, now)
+            settleWindow()
+        }
+    }
+
+    /**
+     * 结算当前计时窗口：与 [ReadBook.settleWindow] 同一套语义——
+     * 内存累计推进、窗口起点重锚，同一事务写入累计表与每日明细；
+     * 事务失败时窗口进入待冲正队列，由后续成功结算或换源流程补写，
+     * 保证单次事务失败不会让每日明细永久少记。
+     */
+    private fun settleWindow() {
+        val windowStart = readStartTime
+        val now = System.currentTimeMillis()
+        // 时钟回拨保护：负窗口按 0 计入，避免累计被扣减
+        val delta = (now - windowStart).coerceAtLeast(0L)
+        readRecord.readTime = readRecord.readTime + delta
+        readStartTime = now
+        readRecord.lastRead = now
+        val book = this.book
+        // 身份重定向：换源迁移成功后，持有旧书籍对象的结算自动归入新身份
+        val identity = book?.let {
+            ReadRecordDetailHelper.resolveMigratedIdentity(it.name, it.author)
+        }
+        if (identity != null) {
+            readRecord.bookName = identity.first
+        }
+        runCatching {
+            appDb.runInTransaction {
+                appDb.readRecordDao.insert(readRecord)
+                if (book != null && identity != null) {
+                    ReadRecordDetailHelper.appendWindow(
+                        identity.first, identity.second, book.type, windowStart, now
+                    )
                 }
-            }.onFailure {
-                AppLog.put("阅读统计写入失败:${it.localizedMessage}", it)
             }
+        }.onSuccess {
+            ReadRecordDetailHelper.retryPendingWork()
+        }.onFailure {
+            AppLog.put("阅读统计写入失败:${it.localizedMessage}", it)
+            if (book != null && delta > 0) {
+                ReadRecordDetailHelper.enqueuePendingStat(
+                    book.name, book.author, book.type, windowStart, now
+                )
+            }
+        }
+    }
+
+    /**
+     * 立即结算在途窗口（仅当当前正在阅读该书时）。
+     * 供换源流程在 globalExecutor 的同一任务内调用，保证旧身份的最后一笔计时
+     * 先于身份迁移落库，迁移完成后旧身份不再接收计时。
+     */
+    fun settleInFlightIfReading(bookUrl: String) {
+        if (book?.bookUrl == bookUrl && AppConfig.enableReadRecord) {
+            settleWindow()
         }
     }
 

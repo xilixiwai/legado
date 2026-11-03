@@ -1181,6 +1181,7 @@
     <string name="read_data_filter_novel">Novels</string>
     <string name="read_data_filter_manga">Manga</string>
     <string name="read_data_clear_all">Clear all reading statistics</string>
+    <string name="read_data_del_record_confirm">This deletes all reading statistics under "%1$s": cumulative reading time and daily details. Books on the shelf with the same name but different authors share the aggregated record, so their same-name statistics will also be removed. The books themselves, reading progress and book sources are not affected.</string>
     <string name="read_data_clear_all_confirm">This will permanently clear all reading statistics on this device (cumulative records and daily stats). This cannot be undone. Books and reading progress will NOT be deleted.</string>
     <string name="read_data_clear_done">Reading statistics cleared</string>
     <string name="read_data_clear_failed">Failed to clear reading statistics</string>

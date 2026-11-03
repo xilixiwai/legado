@@ -234,4 +234,171 @@ class ReadRecordDetailDbTest {
         assertEquals(50_000L * 30, rank[0].readTime)
     }
 
+    /** 窗口起点对应的本地自然日（待冲正窗口的日期归属验证用） */
+    private fun dateOf(epochMs: Long): String {
+        return java.time.Instant.ofEpochMilli(epochMs)
+            .atZone(java.time.ZoneId.systemDefault()).toLocalDate().toString()
+    }
+
+    @Test
+    fun doubleWriteTransactionRollsBackAtomically() {
+        // 用真实 SQLite 触发器在每日明细插入时制造失败，验证双表同事务整体回滚
+        val support = db.openHelper.writableDatabase
+        support.execSQL(
+            "create trigger fail_detail_insert before insert on readRecordDetail " +
+                    "begin select raise(abort, 'simulated io failure'); end"
+        )
+        val threw = runCatching {
+            db.runInTransaction {
+                db.readRecordDao.insert(
+                    io.legado.app.data.entities.ReadRecord().apply {
+                        deviceId = ""; bookName = "事务书"; readTime = 1000L
+                    }
+                )
+                db.readRecordDetailDao.insert(row(bookName = "事务书"))
+            }
+            false
+        }.getOrElse { true }
+        assertTrue("事务应抛出异常", threw)
+        // 累计表写入随明细失败整体回滚
+        assertEquals(0, db.readRecordDao.all.size)
+        assertEquals(0, db.readRecordDetailDao.all.size)
+        support.execSQL("drop trigger fail_detail_insert")
+        // 重试成功
+        db.runInTransaction {
+            db.readRecordDao.insert(
+                io.legado.app.data.entities.ReadRecord().apply {
+                    deviceId = ""; bookName = "事务书"; readTime = 1000L
+                }
+            )
+            db.readRecordDetailDao.insert(row(bookName = "事务书"))
+        }
+        assertEquals(1000L, db.readRecordDao.all[0].readTime)
+        assertEquals(1, db.readRecordDetailDao.all.size)
+    }
+
+    @Test
+    fun retryPendingWorkAppliesWindowExactlyOnce() {
+        val androidId = io.legado.app.constant.AppConst.androidId
+        io.legado.app.help.book.ReadRecordDetailHelper.enqueuePendingStat(
+            "待冲正书", "作者", 8, 1_000_000L, 1_200_000L
+        )
+        io.legado.app.help.book.ReadRecordDetailHelper.retryPendingWork(db)
+        val date = dateOf(1_000_000L)
+        // 每日明细补写，时长=窗口长度
+        assertEquals(
+            200_000L,
+            db.readRecordDetailDao.get(androidId, "待冲正书", "作者", date)?.readTime
+        )
+        // 累计表本机分区同步补齐
+        assertEquals(200_000L, db.readRecordDao.get("", "待冲正书")?.readTime)
+        // 重复重试不重复累计
+        io.legado.app.help.book.ReadRecordDetailHelper.retryPendingWork(db)
+        assertEquals(
+            200_000L,
+            db.readRecordDetailDao.getByBook(androidId, "待冲正书", "作者").sumOf { it.readTime }
+        )
+        assertEquals(200_000L, db.readRecordDao.get("", "待冲正书")?.readTime)
+    }
+
+    @Test
+    fun retryPendingWorkFollowsIdentityRedirect() {
+        val androidId = io.legado.app.constant.AppConst.androidId
+        // 先有旧身份已落库数据并完成迁移（迁移成功会注册身份重定向）
+        db.readRecordDetailDao.insert(
+            row(deviceId = androidId, bookName = "重定向旧名", bookAuthor = "旧作者", readTime = 50_000L)
+        )
+        io.legado.app.help.book.ReadRecordDetailHelper.migrateBookIdentity(
+            "重定向旧名", "旧作者", "重定向新名", "新作者", db
+        )
+        // 迁移后仍有旧身份窗口待冲正（模拟迁移前事务失败未落库的结算）
+        io.legado.app.help.book.ReadRecordDetailHelper.enqueuePendingStat(
+            "重定向旧名", "旧作者", 8, 2_000_000L, 2_100_000L
+        )
+        io.legado.app.help.book.ReadRecordDetailHelper.retryPendingWork(db)
+        // 冲正窗口归入新身份，旧身份不再新增
+        assertEquals(0, db.readRecordDetailDao.getByBook(androidId, "重定向旧名", "旧作者").size)
+        assertEquals(
+            150_000L,
+            db.readRecordDetailDao.getByBook(androidId, "重定向新名", "新作者").sumOf { it.readTime }
+        )
+        assertNull(db.readRecordDao.get("", "重定向旧名"))
+        assertEquals(100_000L, db.readRecordDao.get("", "重定向新名")?.readTime)
+    }
+
+    @Test
+    fun migrateIdentityTwiceDoesNotDoubleSum() {
+        val androidId = io.legado.app.constant.AppConst.androidId
+        db.readRecordDetailDao.insert(
+            row(deviceId = androidId, bookName = "幂等旧名", bookAuthor = "作者", readTime = 100_000L)
+        )
+        db.readRecordDao.insert(
+            io.legado.app.data.entities.ReadRecord().apply {
+                deviceId = ""; bookName = "幂等旧名"; readTime = 100_000L
+            }
+        )
+        io.legado.app.help.book.ReadRecordDetailHelper.migrateBookIdentity(
+            "幂等旧名", "作者", "幂等新名", "作者", db
+        )
+        assertEquals(
+            100_000L,
+            db.readRecordDetailDao.getByBook(androidId, "幂等新名", "作者").sumOf { it.readTime }
+        )
+        assertEquals(100_000L, db.readRecordDao.get("", "幂等新名")?.readTime)
+        // 第二次执行：源键已空，整体为空操作，不重复求和
+        io.legado.app.help.book.ReadRecordDetailHelper.migrateBookIdentity(
+            "幂等旧名", "作者", "幂等新名", "作者", db
+        )
+        assertEquals(
+            100_000L,
+            db.readRecordDetailDao.getByBook(androidId, "幂等新名", "作者").sumOf { it.readTime }
+        )
+        assertEquals(100_000L, db.readRecordDao.get("", "幂等新名")?.readTime)
+        assertEquals(0, db.readRecordDetailDao.getByBook(androidId, "幂等旧名", "作者").size)
+        assertNull(db.readRecordDao.get("", "幂等旧名"))
+    }
+
+    @Test
+    fun ownPartitionQueryExcludesForeignDeviceRows() {
+        db.readRecordDao.insert(
+            io.legado.app.data.entities.ReadRecord().apply {
+                deviceId = ""; bookName = "分区书"; readTime = 50_000L
+            }
+        )
+        db.readRecordDao.insert(
+            io.legado.app.data.entities.ReadRecord().apply {
+                deviceId = "otherDev"; bookName = "分区书"; readTime = 100_000L
+            }
+        )
+        // 计时基数只取本机分区；跨设备求和仅用于展示口径
+        assertEquals(50_000L, db.readRecordDao.getOwnReadTime("分区书"))
+        assertEquals(150_000L, db.readRecordDao.getReadTime("分区书"))
+    }
+
+    @Test
+    fun deleteByNameMatchesUiDeclaredScope() {
+        val book = io.legado.app.data.entities.Book()
+        book.name = "同名书"
+        book.author = "作者甲"
+        book.bookUrl = "https://a.example/x"
+        book.origin = "https://a.example"
+        db.bookDao.insert(book)
+        db.readRecordDetailDao.insert(row(bookName = "同名书", bookAuthor = "作者甲"))
+        db.readRecordDetailDao.insert(row(bookName = "同名书", bookAuthor = "作者乙"))
+        db.readRecordDetailDao.insert(row(bookName = "其他书"))
+        db.readRecordDao.insert(
+            io.legado.app.data.entities.ReadRecord().apply {
+                deviceId = ""; bookName = "同名书"; readTime = 1L
+            }
+        )
+        // 与 UI 提示一致：删除书名聚合行会同时移除同名不同作者的统计
+        db.readRecordDao.deleteByName("同名书")
+        db.readRecordDetailDao.deleteByName("同名书")
+        assertEquals(1, db.readRecordDetailDao.all.size)
+        assertEquals("其他书", db.readRecordDetailDao.all[0].bookName)
+        assertEquals(0, db.readRecordDao.all.size)
+        // 书籍本身不受影响
+        assertEquals(1, db.bookDao.all.size)
+    }
+
 }

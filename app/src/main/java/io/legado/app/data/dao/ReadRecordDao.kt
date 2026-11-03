@@ -41,6 +41,14 @@ interface ReadRecordDao {
     @Query("select readTime from readRecord where deviceId = :androidId and bookName = :bookName")
     fun getReadTime(androidId: String, bookName: String): Long?
 
+    /**
+     * 本机分区（历史行 deviceId 为空串）的累计时长。
+     * 运行时计时基数必须取本机分区：其他设备分区的行是其他设备的书籍副本，
+     * 参与基数会在每次结算 REPLACE 后逐次膨胀。
+     */
+    @Query("select readTime from readRecord where deviceId = '' and bookName = :bookName")
+    fun getOwnReadTime(bookName: String): Long?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     fun insert(vararg readRecord: ReadRecord)
 

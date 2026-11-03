@@ -171,4 +171,16 @@ class ReadRecordDetailHelperTest {
         assertEquals(700_000L, target.readTime)
     }
 
+    @Test
+    fun `身份重定向按链解析到最终身份且不影响无关书籍`() {
+        // 链式换源：A→B 之后又 B→C，旧身份应解析到最终身份 C
+        ReadRecordDetailHelper.registerIdentityRedirect("链A", "作者", "链B", "作者")
+        ReadRecordDetailHelper.registerIdentityRedirect("链B", "作者", "链C", "作者")
+        assertEquals(Pair("链C", "作者"), ReadRecordDetailHelper.resolveMigratedIdentity("链A", "作者"))
+        assertEquals(Pair("链C", "作者"), ReadRecordDetailHelper.resolveMigratedIdentity("链B", "作者"))
+        // 未迁移的书籍不受影响；同名不同作者的键也不受影响
+        assertEquals(Pair("无关书", "作者"), ReadRecordDetailHelper.resolveMigratedIdentity("无关书", "作者"))
+        assertEquals(Pair("链A", "另一作者"), ReadRecordDetailHelper.resolveMigratedIdentity("链A", "另一作者"))
+    }
+
 }

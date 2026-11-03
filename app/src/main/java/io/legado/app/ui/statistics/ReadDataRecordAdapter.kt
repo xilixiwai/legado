@@ -79,7 +79,8 @@ class ReadDataRecordAdapter(context: Context) :
     private fun sureDelAlert(item: ReadRecordShow) {
         (context as? LifecycleOwner)?.lifecycleScope?.launch {
             context.alert(R.string.delete) {
-                setMessage(context.getString(R.string.sure_del_any, item.bookName))
+                // 明确告知删除范围：书名聚合行，含同名不同作者书籍的统计；不动书籍/进度/书源
+                setMessage(context.getString(R.string.read_data_del_record_confirm, item.bookName))
                 yesButton {
                     (context as? LifecycleOwner)?.lifecycleScope?.launch {
                         withContext(Dispatchers.IO) {
