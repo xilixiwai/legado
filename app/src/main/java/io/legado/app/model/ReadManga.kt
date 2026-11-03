@@ -11,6 +11,7 @@ import io.legado.app.help.AppWebDav
 import io.legado.app.help.ConcurrentRateLimiter
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ContentProcessor
+import io.legado.app.help.book.ReadRecordDetailHelper
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.isSameNameAuthor
 import io.legado.app.help.book.readSimulating
@@ -132,11 +133,33 @@ object ReadManga : CoroutineScope by MainScope() {
             if (!AppConfig.enableReadRecord) {
                 return@execute
             }
-            readRecord.readTime = readRecord.readTime + System.currentTimeMillis() - readStartTime
-            readStartTime = System.currentTimeMillis()
-            readRecord.lastRead = System.currentTimeMillis()
-            appDb.readRecordDao.insert(readRecord)
+            val windowStart = readStartTime
+            val now = System.currentTimeMillis()
+            readRecord.readTime = readRecord.readTime + now - windowStart
+            readStartTime = now
+            readRecord.lastRead = now
+            val book = this.book
+            runCatching {
+                appDb.runInTransaction {
+                    appDb.readRecordDao.insert(readRecord)
+                    // 每日明细与累计表同事务写入，任一失败整体回滚
+                    ReadRecordDetailHelper.appendWindow(book, windowStart, now)
+                }
+            }.onFailure {
+                AppLog.put("阅读统计写入失败:${it.localizedMessage}", it)
+            }
         }
+    }
+
+    /**
+     * 清空阅读统计后重置内存累计缓存并重锚计时窗口，
+     * 防止清空前缓存的旧累计值和未结算窗口被下次翻页整段写回。
+     * 只影响统计，不触碰阅读进度。
+     */
+    fun resetReadRecordCache() {
+        readRecord.readTime = 0
+        readRecord.lastRead = System.currentTimeMillis()
+        readStartTime = System.currentTimeMillis()
     }
 
     @Synchronized

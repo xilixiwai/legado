@@ -1,0 +1,191 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/nested_scroll"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:clipToPadding="false">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="10dp">
+
+        <TextView
+            android:id="@+id/tv_duplicate_warning"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="6dp"
+            android:text="@string/statistics_duplicate_warning"
+            android:textColor="@color/secondaryText"
+            android:textSize="12sp"
+            android:visibility="gone"
+            tools:visibility="visible" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <LinearLayout style="@style/ReadDataStatCell">
+
+                <TextView
+                    android:id="@+id/tv_total_time"
+                    style="@style/ReadDataStatValue"
+                    tools:text="12小时30分钟" />
+
+                <TextView
+                    style="@style/ReadDataStatLabel"
+                    android:text="@string/all_read_time" />
+            </LinearLayout>
+
+            <LinearLayout style="@style/ReadDataStatCell">
+
+                <TextView
+                    android:id="@+id/tv_total_books"
+                    style="@style/ReadDataStatValue"
+                    tools:text="25" />
+
+                <TextView
+                    style="@style/ReadDataStatLabel"
+                    android:text="@string/statistics_total_books" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <LinearLayout style="@style/ReadDataStatCell">
+
+                <TextView
+                    android:id="@+id/tv_reading_count"
+                    style="@style/ReadDataStatValue"
+                    tools:text="10" />
+
+                <TextView
+                    style="@style/ReadDataStatLabel"
+                    android:text="@string/filter_reading" />
+            </LinearLayout>
+
+            <LinearLayout style="@style/ReadDataStatCell">
+
+                <TextView
+                    android:id="@+id/tv_finished_count"
+                    style="@style/ReadDataStatValue"
+                    tools:text="8" />
+
+                <TextView
+                    style="@style/ReadDataStatLabel"
+                    android:text="@string/filter_finished" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <LinearLayout style="@style/ReadDataStatCell">
+
+                <TextView
+                    android:id="@+id/tv_week_time"
+                    style="@style/ReadDataStatValue"
+                    tools:text="3小时20分钟" />
+
+                <TextView
+                    style="@style/ReadDataStatLabel"
+                    android:text="@string/read_data_this_week" />
+            </LinearLayout>
+
+            <LinearLayout style="@style/ReadDataStatCell">
+
+                <TextView
+                    android:id="@+id/tv_month_time"
+                    style="@style/ReadDataStatValue"
+                    tools:text="10小时" />
+
+                <TextView
+                    style="@style/ReadDataStatLabel"
+                    android:text="@string/read_data_this_month" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <LinearLayout style="@style/ReadDataStatCell">
+
+                <TextView
+                    android:id="@+id/tv_days_read"
+                    style="@style/ReadDataStatValue"
+                    tools:text="15" />
+
+                <TextView
+                    style="@style/ReadDataStatLabel"
+                    android:text="@string/read_data_days_read" />
+            </LinearLayout>
+
+            <LinearLayout style="@style/ReadDataStatCell">
+
+                <TextView
+                    android:id="@+id/tv_daily_avg"
+                    style="@style/ReadDataStatValue"
+                    tools:text="32分钟" />
+
+                <TextView
+                    style="@style/ReadDataStatLabel"
+                    android:text="@string/read_data_daily_avg" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:padding="6dp"
+            android:text="@string/read_data_recent_7_days"
+            android:textColor="@color/primaryText"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+        <LinearLayout
+            android:id="@+id/ll_trend"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:padding="6dp"
+            android:text="@string/statistics_recent_read"
+            android:textColor="@color/primaryText"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rv_recent"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:nestedScrollingEnabled="false"
+            tools:itemCount="3"
+            tools:listitem="@layout/item_statistics_book" />
+
+        <TextView
+            android:id="@+id/tv_empty"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:padding="20dp"
+            android:text="@string/statistics_empty"
+            android:textColor="@color/secondaryText"
+            android:visibility="gone" />
+
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>

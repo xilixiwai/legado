@@ -308,6 +308,11 @@
             android:name=".ui.statistics.ReadingStatisticsActivity"
             android:configChanges="orientation|screenSize"
             android:hardwareAccelerated="true" />
+        <!-- 阅读数据中心 -->
+        <activity
+            android:name=".ui.statistics.ReadDataCenterActivity"
+            android:configChanges="orientation|screenSize"
+            android:hardwareAccelerated="true" />
         <!-- 字典管理 -->
         <activity
             android:name=".ui.dict.rule.DictRuleActivity"

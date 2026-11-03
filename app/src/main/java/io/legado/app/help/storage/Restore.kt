@@ -18,6 +18,7 @@ import io.legado.app.data.entities.DictRule
 import io.legado.app.data.entities.HttpTTS
 import io.legado.app.data.entities.KeyboardAssist
 import io.legado.app.data.entities.ReadRecord
+import io.legado.app.data.entities.ReadRecordDetail
 import io.legado.app.data.entities.ReplaceRule
 import io.legado.app.data.entities.RssSource
 import io.legado.app.data.entities.RssStar
@@ -27,6 +28,7 @@ import io.legado.app.data.entities.Server
 import io.legado.app.data.entities.TxtTocRule
 import io.legado.app.help.DirectLinkUpload
 import io.legado.app.help.LauncherIconHelp
+import io.legado.app.help.book.ReadRecordDetailHelper
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.upType
 import io.legado.app.help.config.LocalConfig
@@ -179,6 +181,23 @@ object Restore {
                         appDb.readRecordDao.insert(readRecord)
                     }
                 }
+            }
+        }
+        fileToListT<ReadRecordDetail>(path, "readRecordDetail.json")?.let { rows ->
+            runCatching {
+                rows.forEach { row ->
+                    // 设备隔离：阅读统计按设备独立计算，其他设备的每日明细不混入本机
+                    if (row.deviceId != androidId) return@forEach
+                    val old = appDb.readRecordDetailDao
+                        .get(row.deviceId, row.bookName, row.bookAuthor, row.date)
+                    if (old == null) {
+                        appDb.readRecordDetailDao.insert(row)
+                    } else if (ReadRecordDetailHelper.mergeRestored(old, row)) {
+                        appDb.readRecordDetailDao.update(old)
+                    }
+                }
+            }.onFailure {
+                AppLog.put("恢复每日阅读统计失败:${it.localizedMessage}", it)
             }
         }
         File(path, "servers.json").takeIf {

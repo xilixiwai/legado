@@ -127,4 +127,54 @@
         <item name="android:layout_width">wrap_content</item>
     </style>
 
+
+    <!-- 阅读数据中心:统计格 -->
+    <style name="ReadDataStatCell">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:orientation">vertical</item>
+        <item name="android:gravity">center</item>
+        <item name="android:padding">10dp</item>
+    </style>
+
+    <style name="ReadDataStatValue">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textColor">@color/primaryText</item>
+        <item name="android:textSize">17sp</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+
+    <style name="ReadDataStatLabel">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textColor">@color/secondaryText</item>
+        <item name="android:textSize">12sp</item>
+    </style>
+
+
+    <style name="ReadDataWeekdayLabel">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:gravity">center</item>
+        <item name="android:padding">4dp</item>
+        <item name="android:textColor">@color/secondaryText</item>
+        <item name="android:textSize">12sp</item>
+    </style>
+
+
+    <style name="ReadDataFilterChip">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:background">?attr/selectableItemBackground</item>
+        <item name="android:padding">10dp</item>
+        <item name="android:textColor">@color/secondaryText</item>
+        <item name="android:textSize">14sp</item>
+    </style>
+
 </resources>
+
+
+

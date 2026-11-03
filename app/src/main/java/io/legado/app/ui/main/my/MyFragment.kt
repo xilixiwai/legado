@@ -19,7 +19,6 @@ import io.legado.app.lib.prefs.fragment.PreferenceFragment
 import io.legado.app.lib.theme.primaryColor
 import io.legado.app.service.WebService
 import io.legado.app.ui.about.AboutActivity
-import io.legado.app.ui.about.ReadRecordActivity
 import io.legado.app.ui.book.bookmark.AllBookmarkActivity
 import io.legado.app.ui.book.source.manage.BookSourceActivity
 import io.legado.app.ui.book.toc.rule.TxtTocRuleActivity
@@ -29,7 +28,7 @@ import io.legado.app.ui.dict.rule.DictRuleActivity
 import io.legado.app.ui.file.FileManageActivity
 import io.legado.app.ui.main.MainFragmentInterface
 import io.legado.app.ui.replace.ReplaceRuleActivity
-import io.legado.app.ui.statistics.ReadingStatisticsActivity
+import io.legado.app.ui.statistics.ReadDataCenterActivity
 import io.legado.app.utils.LogUtils
 import io.legado.app.utils.getPrefBoolean
 import io.legado.app.utils.observeEventSticky
@@ -163,8 +162,8 @@ class MyFragment() : BaseFragment(R.layout.fragment_my_config), MainFragmentInte
                 }
 
                 "fileManage" -> startActivity<FileManageActivity>()
-                "readRecord" -> startActivity<ReadRecordActivity>()
-                "readingStatistics" -> startActivity<ReadingStatisticsActivity>()
+                "readRecord" -> startActivity<ReadDataCenterActivity>()
+                "readingStatistics" -> startActivity<ReadDataCenterActivity>()
                 "about" -> startActivity<AboutActivity>()
                 "exit" -> activity?.finish()
             }

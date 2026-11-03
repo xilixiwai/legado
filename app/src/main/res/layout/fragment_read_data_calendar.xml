@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:clipToPadding="false">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="10dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/tv_month_prev"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:padding="10dp"
+                android:text="◀"
+                android:textColor="@color/primaryText"
+                tools:ignore="HardcodedText" />
+
+            <TextView
+                android:id="@+id/tv_month_title"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:textColor="@color/primaryText"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                tools:text="2026年11月" />
+
+            <TextView
+                android:id="@+id/tv_month_next"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:padding="10dp"
+                android:text="▶"
+                android:textColor="@color/primaryText"
+                tools:ignore="HardcodedText" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <TextView
+                style="@style/ReadDataWeekdayLabel"
+                android:text="@string/monday_short" />
+
+            <TextView
+                style="@style/ReadDataWeekdayLabel"
+                android:text="@string/tuesday_short" />
+
+            <TextView
+                style="@style/ReadDataWeekdayLabel"
+                android:text="@string/wednesday_short" />
+
+            <TextView
+                style="@style/ReadDataWeekdayLabel"
+                android:text="@string/thursday_short" />
+
+            <TextView
+                style="@style/ReadDataWeekdayLabel"
+                android:text="@string/friday_short" />
+
+            <TextView
+                style="@style/ReadDataWeekdayLabel"
+                android:text="@string/saturday_short" />
+
+            <TextView
+                style="@style/ReadDataWeekdayLabel"
+                android:text="@string/sunday_short" />
+        </LinearLayout>
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rv_calendar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:overScrollMode="never"
+            app:layoutManager="androidx.recyclerview.widget.GridLayoutManager"
+            app:spanCount="7"
+            tools:itemCount="35"
+            tools:listitem="@layout/item_read_data_calendar_day" />
+
+        <TextView
+            android:id="@+id/tv_since"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:padding="6dp"
+            android:textColor="@color/secondaryText"
+            android:textSize="12sp"
+            tools:text="数据起始 2026-11-04" />
+
+        <TextView
+            android:id="@+id/tv_day_summary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:padding="6dp"
+            android:textColor="@color/primaryText"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            tools:text="11月4日 共阅读 1小时20分钟 · 2 本" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rv_day_detail"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:nestedScrollingEnabled="false"
+            tools:itemCount="3"
+            tools:listitem="@layout/item_read_data_day" />
+
+        <TextView
+            android:id="@+id/tv_empty"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:padding="20dp"
+            android:text="@string/read_data_calendar_month_empty"
+            android:textColor="@color/secondaryText"
+            android:visibility="gone" />
+
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>

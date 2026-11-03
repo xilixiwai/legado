@@ -83,6 +83,9 @@ interface BookDao {
     @Query("SELECT * FROM books WHERE `name` in (:names)")
     fun findByName(vararg names: String): List<Book>
 
+    @Query("select * from books where name = :name and author = :author limit 1")
+    fun getByNameAuthor(name: String, author: String): Book?
+
     @Query("select * from books where originName = :fileName")
     fun getBookByFileName(fileName: String): Book?
 
