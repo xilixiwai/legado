@@ -27,8 +27,9 @@ import java.time.temporal.TemporalAdjusters
  * - 清空操作与计时写入共用同一个单线程执行器（globalExecutor），串行执行，
  *   并在清空提交后重置阅读模型单例的内存缓存与计时窗口起点，
  *   保证已排队/进行中的旧窗口不会在清空后把旧数据写回；
- * - 事务失败的计时窗口进入待冲正队列（[pendingStats]），由后续成功的结算
- *   在同一事务内补写每日明细并补齐累计表，保证单次事务失败不造成两表永久不一致。
+ * - 事务失败的计时窗口撤销内存推进后进入待冲正队列（[pendingStats]），
+ *   由后续成功的结算在同一事务内补写每日明细并补齐累计表，并把时长同步回
+ *   当前活动书籍的内存累计，保证每个窗口只入账一次、两表与内存最终一致。
  *
  * 并发约定：本对象的队列等可变状态只在 globalExecutor 线程读写
  * （计时结算、清空全部在该队列上串行）；androidTest 可在测试线程
@@ -150,19 +151,21 @@ object ReadRecordDetailHelper {
     }
 
     /**
-     * 冲正待冲正窗口：每个窗口在单个事务内完成每日明细补写 + 累计表本机分区补差
-     * （内存累计已含该窗口，落库收敛，不会重复累计）；成功才出队，
-     * 失败保留等待下次重试，数据库持续不可用时保持队列原样。
+     * 冲正待冲正窗口：每个窗口在单个事务内完成每日明细补写 + 累计表本机分区补差；
+     * 成功才出队，失败整体回滚并保留队列等待下次重试，数据库持续不可用时保持队列原样。
+     * 结算失败时内存累计已撤销该窗口（见调用方），累计表确实缺少该窗口时长，
+     * 补差不会重复入账；补差提交后若该书正被阅读，同步补入其内存累计，
+     * 防止该书下一次结算的整行 REPLACE 丢掉刚补入数据库的时长。
      */
     fun retryPendingWork(db: io.legado.app.data.AppDatabase = appDb) {
         for (entry in pendingStats.toList()) {
+            val delta = entry.windowEnd - entry.windowStart
             val ok = runCatching {
                 db.runInTransaction {
                     appendWindow(
                         entry.bookName, entry.bookAuthor, entry.bookType,
                         entry.windowStart, entry.windowEnd, db
                     )
-                    val delta = entry.windowEnd - entry.windowStart
                     val recordDao = db.readRecordDao
                     val existing = recordDao.get("", entry.bookName)
                     if (existing == null) {
@@ -186,9 +189,13 @@ object ReadRecordDetailHelper {
                 false
             }
             if (ok) {
+                // 事务已提交：若该窗口属于当前活动书籍，把时长同步补入其内存累计，
+                // 否则该书下一次结算的 REPLACE 会以未含该窗口的内存覆盖数据库
+                ReadBook.addReconciledReadTime(entry.bookName, delta)
+                ReadManga.addReconciledReadTime(entry.bookName, delta)
                 pendingStats.remove(entry)
             } else {
-                // 数据库仍不可用：保留队列，等待下次结算成功后再试
+                // 数据库仍不可用：保留队列、不触碰内存，等待下次结算成功后再试
                 return
             }
         }

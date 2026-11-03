@@ -23,6 +23,8 @@ import org.junit.runner.RunWith
 class ReadRecordDetailDbTest {
 
     private lateinit var db: AppDatabase
+    private var savedReadBook: io.legado.app.data.entities.Book? = null
+    private var savedReadManga: io.legado.app.data.entities.Book? = null
 
     @Before
     fun setup() {
@@ -30,10 +32,21 @@ class ReadRecordDetailDbTest {
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
+        // 阅读模型是进程级单例：暂存活动书籍并在结束后恢复，避免用例互相污染
+        savedReadBook = io.legado.app.model.ReadBook.book
+        savedReadManga = io.legado.app.model.ReadManga.book
+        io.legado.app.model.ReadBook.book = null
+        io.legado.app.model.ReadManga.book = null
+        io.legado.app.model.ReadBook.resetReadRecordCache()
+        io.legado.app.model.ReadManga.resetReadRecordCache()
     }
 
     @After
     fun tearDown() {
+        io.legado.app.model.ReadBook.book = savedReadBook
+        io.legado.app.model.ReadManga.book = savedReadManga
+        io.legado.app.model.ReadBook.resetReadRecordCache()
+        io.legado.app.model.ReadManga.resetReadRecordCache()
         db.close()
     }
 
@@ -420,6 +433,176 @@ class ReadRecordDetailDbTest {
         db.readRecordDetailDao.insert(row(bookName = "清空书", readTime = 5_000L))
         assertEquals(5_000L, db.readRecordDao.all[0].readTime)
         assertEquals(1, db.readRecordDetailDao.all.size)
+    }
+
+    @Test
+    fun rollbackUncommittedWindowRestoresExactMemory() {
+        io.legado.app.model.ReadBook.book =
+            io.legado.app.data.entities.Book(name = "回滚书", author = "作者")
+        io.legado.app.model.ReadBook.resetReadRecordCache()
+        val memBefore = io.legado.app.model.ReadBook.readTimeForTest
+        assertEquals(0L, memBefore)
+        // 构造"内存已推进 10 秒但窗口未提交"的状态（测试中抬高内存累计的受控入口）
+        assertTrue(io.legado.app.model.ReadBook.addReconciledReadTime("回滚书", 10_000L))
+        // 撤销未提交推进：恢复推进前原值，而不是按差值误减
+        io.legado.app.model.ReadBook.rollbackUncommittedWindow("回滚书", memBefore, 10_000L)
+        assertEquals(0L, io.legado.app.model.ReadBook.readTimeForTest)
+    }
+
+    @Test
+    fun rollbackUncommittedWindowIgnoresMismatchedIdentityOrValue() {
+        io.legado.app.model.ReadBook.book =
+            io.legado.app.data.entities.Book(name = "守卫书", author = "作者")
+        io.legado.app.model.ReadBook.resetReadRecordCache()
+        assertTrue(io.legado.app.model.ReadBook.addReconciledReadTime("守卫书", 10_000L))
+        // 书名不匹配（失败后已切书，内存已被另一本书整体重载）：不得撤销
+        io.legado.app.model.ReadBook.rollbackUncommittedWindow("别的书", 0L, 10_000L)
+        assertEquals(10_000L, io.legado.app.model.ReadBook.readTimeForTest)
+        // 数值不匹配（内存不是"该快照 + 该窗口"）：不得撤销
+        io.legado.app.model.ReadBook.rollbackUncommittedWindow("守卫书", 5_000L, 10_000L)
+        assertEquals(10_000L, io.legado.app.model.ReadBook.readTimeForTest)
+        // 身份与数值都匹配才撤销
+        io.legado.app.model.ReadBook.rollbackUncommittedWindow("守卫书", 0L, 10_000L)
+        assertEquals(0L, io.legado.app.model.ReadBook.readTimeForTest)
+    }
+
+    @Test
+    fun addReconciledReadTimeInjectsOnlyCurrentBook() {
+        // 无活动书籍：不补入
+        assertFalse(io.legado.app.model.ReadBook.addReconciledReadTime("任何书", 5_000L))
+        assertEquals(0L, io.legado.app.model.ReadBook.readTimeForTest)
+        io.legado.app.model.ReadBook.book =
+            io.legado.app.data.entities.Book(name = "在读书", author = "作者甲")
+        // 非当前活动书籍的窗口不补入
+        assertFalse(io.legado.app.model.ReadBook.addReconciledReadTime("其他书", 5_000L))
+        assertEquals(0L, io.legado.app.model.ReadBook.readTimeForTest)
+        // 累计表本机行按书名聚合（同名不同作者共享），同名即须补入以防 REPLACE 丢失
+        assertTrue(io.legado.app.model.ReadBook.addReconciledReadTime("在读书", 5_000L))
+        assertEquals(5_000L, io.legado.app.model.ReadBook.readTimeForTest)
+    }
+
+    @Test
+    fun mangaMemoryRollbackAndReconcileMirrorNovel() {
+        io.legado.app.model.ReadManga.book =
+            io.legado.app.data.entities.Book(name = "漫画书", author = "作者", type = 8)
+        io.legado.app.model.ReadManga.resetReadRecordCache()
+        assertTrue(io.legado.app.model.ReadManga.addReconciledReadTime("漫画书", 10_000L))
+        assertEquals(10_000L, io.legado.app.model.ReadManga.readTimeForTest)
+        io.legado.app.model.ReadManga.rollbackUncommittedWindow("漫画书", 0L, 10_000L)
+        assertEquals(0L, io.legado.app.model.ReadManga.readTimeForTest)
+        // 小说与漫画两条链路互不串内存
+        assertFalse(io.legado.app.model.ReadBook.addReconciledReadTime("漫画书", 3_000L))
+        assertTrue(io.legado.app.model.ReadManga.addReconciledReadTime("漫画书", 3_000L))
+        assertEquals(3_000L, io.legado.app.model.ReadManga.readTimeForTest)
+        assertEquals(0L, io.legado.app.model.ReadBook.readTimeForTest)
+    }
+
+    @Test
+    fun settleFailureThenReconcileCountsWindowOnce() {
+        // 场景 A/B/D（真实 SQLite）：基线累计 100_000；w1=10_000 结算失败
+        db.readRecordDao.insert(
+            io.legado.app.data.entities.ReadRecord().apply {
+                deviceId = ""; bookName = "书A"; readTime = 100_000L
+            }
+        )
+        io.legado.app.help.book.ReadRecordDetailHelper.enqueuePendingStat(
+            "书A", "作者A", 0, 1_000_000L, 1_010_000L
+        )
+        // 失败未提交：数据库保持 100_000
+        assertEquals(100_000L, db.readRecordDao.get("", "书A")?.readTime)
+        // w2=20_000 正常结算（等价 settleWindow 已提交路径：REPLACE + appendWindow）
+        db.readRecordDao.insert(
+            io.legado.app.data.entities.ReadRecord().apply {
+                deviceId = ""; bookName = "书A"; readTime = 120_000L
+            }
+        )
+        db.readRecordDetailDao.insert(row(bookName = "书A", bookAuthor = "作者A", readTime = 20_000L))
+        // 冲正 w1：累计表 130_000；当前活动书籍内存同步补入该窗口
+        io.legado.app.model.ReadBook.book =
+            io.legado.app.data.entities.Book(name = "书A", author = "作者A")
+        io.legado.app.model.ReadBook.resetReadRecordCache()
+        io.legado.app.help.book.ReadRecordDetailHelper.retryPendingWork(db)
+        assertEquals(130_000L, db.readRecordDao.get("", "书A")?.readTime)
+        assertEquals(10_000L, io.legado.app.model.ReadBook.readTimeForTest)
+        // 每日明细合计 30_000（失败窗口 10_000 + 正常窗口 20_000），不是 40_000
+        assertEquals(
+            30_000L,
+            db.readRecordDetailDao.all.filter { it.bookName == "书A" }.sumOf { it.readTime }
+        )
+        // 场景 B：冲正后再结算 5_000——写库以"含冲正补差的内存"为基数，已冲正时长不丢
+        db.readRecordDao.insert(
+            io.legado.app.data.entities.ReadRecord().apply {
+                deviceId = ""; bookName = "书A"; readTime = 135_000L
+            }
+        )
+        db.readRecordDetailDao.insert(row(bookName = "书A", bookAuthor = "作者A", readTime = 5_000L))
+        assertEquals(135_000L, db.readRecordDao.get("", "书A")?.readTime)
+        assertEquals(
+            35_000L,
+            db.readRecordDetailDao.all.filter { it.bookName == "书A" }.sumOf { it.readTime }
+        )
+        // 场景 D：w4=8_000 再次失败入队；触发器让第一次冲正事务失败
+        io.legado.app.help.book.ReadRecordDetailHelper.enqueuePendingStat(
+            "书A", "作者A", 0, 2_000_000L, 2_008_000L
+        )
+        val support = db.openHelper.writableDatabase
+        support.execSQL(
+            "create trigger fail_reconcile before update on readRecord " +
+                    "begin select raise(abort, 'simulated failure'); end"
+        )
+        io.legado.app.help.book.ReadRecordDetailHelper.retryPendingWork(db)
+        support.execSQL("drop trigger fail_reconcile")
+        // 第一次冲正失败：两表不动、内存不补、队列保留
+        assertEquals(135_000L, db.readRecordDao.get("", "书A")?.readTime)
+        assertEquals(10_000L, io.legado.app.model.ReadBook.readTimeForTest)
+        assertEquals(
+            35_000L,
+            db.readRecordDetailDao.all.filter { it.bookName == "书A" }.sumOf { it.readTime }
+        )
+        // 第二次冲正成功：w4 只入账一次（累计 143_000、明细 43_000、内存同步）
+        io.legado.app.help.book.ReadRecordDetailHelper.retryPendingWork(db)
+        assertEquals(143_000L, db.readRecordDao.get("", "书A")?.readTime)
+        assertEquals(18_000L, io.legado.app.model.ReadBook.readTimeForTest)
+        assertEquals(
+            43_000L,
+            db.readRecordDetailDao.all.filter { it.bookName == "书A" }.sumOf { it.readTime }
+        )
+        // 队列已清空：连续重试不再变化
+        io.legado.app.help.book.ReadRecordDetailHelper.retryPendingWork(db)
+        assertEquals(143_000L, db.readRecordDao.get("", "书A")?.readTime)
+    }
+
+    @Test
+    fun reconcileAfterBookSwitchOnlyTouchesSwitchedOutBookRow() {
+        // 场景 C：书A 结算失败入队后切到书B；书B 正常结算并触发冲正
+        db.readRecordDao.insert(
+            io.legado.app.data.entities.ReadRecord().apply {
+                deviceId = ""; bookName = "书A"; readTime = 50_000L
+            }
+        )
+        io.legado.app.help.book.ReadRecordDetailHelper.enqueuePendingStat(
+            "书A", "作者A", 0, 3_000_000L, 3_010_000L
+        )
+        // 切到书B（等价 resetData：内存整体重载为书B），书B 正常结算 7_000
+        io.legado.app.model.ReadBook.book =
+            io.legado.app.data.entities.Book(name = "书B", author = "作者B")
+        io.legado.app.model.ReadBook.resetReadRecordCache()
+        db.readRecordDao.insert(
+            io.legado.app.data.entities.ReadRecord().apply {
+                deviceId = ""; bookName = "书B"; readTime = 7_000L
+            }
+        )
+        db.readRecordDetailDao.insert(row(bookName = "书B", bookAuthor = "作者B", readTime = 7_000L))
+        io.legado.app.help.book.ReadRecordDetailHelper.retryPendingWork(db)
+        // 书A 累计正确补入 10_000；书B 只有自己的 7_000
+        assertEquals(60_000L, db.readRecordDao.get("", "书A")?.readTime)
+        assertEquals(7_000L, db.readRecordDao.get("", "书B")?.readTime)
+        // 书A 的冲正不得修改书B 的内存累计
+        assertEquals(0L, io.legado.app.model.ReadBook.readTimeForTest)
+        // 补差 API 只认当前活动书籍
+        assertFalse(io.legado.app.model.ReadBook.addReconciledReadTime("书A", 1_000L))
+        assertTrue(io.legado.app.model.ReadBook.addReconciledReadTime("书B", 1_000L))
+        assertEquals(1_000L, io.legado.app.model.ReadBook.readTimeForTest)
     }
 
 }

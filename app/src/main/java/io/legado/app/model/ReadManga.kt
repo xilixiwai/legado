@@ -142,8 +142,9 @@ object ReadManga : CoroutineScope by MainScope() {
     /**
      * 结算当前计时窗口：与 [ReadBook.settleWindow] 同一套语义——
      * 内存累计推进、窗口起点重锚，同一事务写入累计表与每日明细；
-     * 事务失败时窗口进入待冲正队列，由后续成功结算补写，
-     * 保证单次事务失败不会让每日明细永久少记。
+     * 事务失败时撤销本次内存推进（计时起点保持已重锚），窗口进入待冲正队列、
+     * 由队列唯一持有，由后续成功结算补写每日明细并补齐累计表、同步当前活动书籍内存，
+     * 保证每个窗口只入账一次。
      * 书籍身份按当前 (name, author) 记账：匹配不到已有统计身份时自然创建新记录，
      * 旧身份记录原样保留，不做自动迁移或合并。
      */
@@ -152,6 +153,7 @@ object ReadManga : CoroutineScope by MainScope() {
         val now = System.currentTimeMillis()
         // 时钟回拨保护：负窗口按 0 计入，避免累计被扣减
         val delta = (now - windowStart).coerceAtLeast(0L)
+        val memBefore = readRecord.readTime
         readRecord.readTime = readRecord.readTime + delta
         readStartTime = now
         readRecord.lastRead = now
@@ -170,12 +172,43 @@ object ReadManga : CoroutineScope by MainScope() {
         }.onFailure {
             AppLog.put("阅读统计写入失败:${it.localizedMessage}", it)
             if (book != null && delta > 0) {
+                // 事务未提交：撤销本次内存推进，窗口改由待冲正队列唯一持有，
+                // 防止下次成功结算的 REPLACE 已携带该窗口、冲正再补差造成双重入账
+                rollbackUncommittedWindow(book.name, memBefore, delta)
                 ReadRecordDetailHelper.enqueuePendingStat(
                     book.name, book.author, book.type, windowStart, now
                 )
             }
         }
     }
+
+    /**
+     * 撤销一次未提交结算窗口对内存累计的推进。
+     * 仅当当前活动书籍仍是该窗口所属书籍、且内存累计仍是"推进前原值 + 该窗口"时
+     * 才恢复为原值，防止切书/重进在本结算任务期间整体重载内存后误减历史累计。
+     * 必须在 globalExecutor 线程调用；internal 供 androidTest 直接验证撤销规则。
+     */
+    internal fun rollbackUncommittedWindow(bookName: String, memBefore: Long, delta: Long) {
+        val current = book ?: return
+        if (current.name == bookName && readRecord.readTime == memBefore + delta) {
+            readRecord.readTime = memBefore
+        }
+    }
+
+    /**
+     * 冲正成功后把待冲正窗口的时长同步补入当前活动书籍的内存累计，
+     * 语义与 [ReadBook.addReconciledReadTime] 一致（累计表本机行按书名聚合）。
+     * 必须在 globalExecutor 线程调用（retryPendingWork）。返回是否补入。
+     */
+    fun addReconciledReadTime(bookName: String, delta: Long): Boolean {
+        val current = book ?: return false
+        if (current.name != bookName) return false
+        readRecord.readTime += delta
+        return true
+    }
+
+    /** 仅供 androidTest 观察内存累计值；业务逻辑不得依赖。 */
+    internal val readTimeForTest: Long get() = readRecord.readTime
 
     /**
      * 清空阅读统计后重置内存累计缓存并重锚计时窗口，

@@ -430,9 +430,10 @@ object ReadBook : CoroutineScope by MainScope() {
      * 结算当前计时窗口：内存累计推进、窗口起点重锚，并在同一事务内写入累计表与每日明细。
      * 必须在 globalExecutor 线程调用（upReadTime）。
      *
-     * 事务失败时：内存累计保留（下次成功结算整行 REPLACE 收敛，不会重复累计），
-     * 窗口进入待冲正队列，由后续成功的结算在同一事务内补写每日明细并补齐累计表，
-     * 保证单次事务失败不会让每日明细永久少记（两表提交语义一致）。
+     * 事务失败时：撤销本次窗口的内存推进（[readStartTime] 保持已重锚，不回滚），
+     * 窗口进入待冲正队列、由队列唯一持有——每个窗口只从"正常结算"或"待冲正"
+     * 中的一条路径入账一次；冲正成功后补写每日明细并补齐累计表，
+     * 同时把时长同步进当前活动书籍的内存累计（见 [addReconciledReadTime]）。
      * 书籍身份按当前 (name, author) 记账：匹配不到已有统计身份时自然创建新记录，
      * 旧身份记录原样保留，不做自动迁移或合并。
      */
@@ -441,6 +442,7 @@ object ReadBook : CoroutineScope by MainScope() {
         val now = System.currentTimeMillis()
         // 时钟回拨保护：负窗口按 0 计入，避免累计被扣减
         val delta = (now - windowStart).coerceAtLeast(0L)
+        val memBefore = readRecord.readTime
         readRecord.readTime = readRecord.readTime + delta
         readStartTime = now
         readRecord.lastRead = now
@@ -459,12 +461,45 @@ object ReadBook : CoroutineScope by MainScope() {
         }.onFailure {
             AppLog.put("阅读统计写入失败:${it.localizedMessage}", it)
             if (book != null && delta > 0) {
+                // 事务未提交：撤销本次内存推进，窗口改由待冲正队列唯一持有，
+                // 防止下次成功结算的 REPLACE 已携带该窗口、冲正再补差造成双重入账
+                rollbackUncommittedWindow(book.name, memBefore, delta)
                 ReadRecordDetailHelper.enqueuePendingStat(
                     book.name, book.author, book.type, windowStart, now
                 )
             }
         }
     }
+
+    /**
+     * 撤销一次未提交结算窗口对内存累计的推进。
+     * 仅当当前活动书籍仍是该窗口所属书籍、且内存累计仍是"推进前原值 + 该窗口"时
+     * 才恢复为原值，防止切书/重进在本结算任务期间整体重载内存后误减历史累计。
+     * 必须在 globalExecutor 线程调用；internal 供 androidTest 直接验证撤销规则。
+     */
+    internal fun rollbackUncommittedWindow(bookName: String, memBefore: Long, delta: Long) {
+        val current = book ?: return
+        if (current.name == bookName && readRecord.readTime == memBefore + delta) {
+            readRecord.readTime = memBefore
+        }
+    }
+
+    /**
+     * 冲正成功后把待冲正窗口的时长同步补入当前活动书籍的内存累计。
+     * 累计表主键是 (deviceId, bookName)，本机行按书名聚合（同名不同作者共享，
+     * 与单本删除的既有口径一致）；该书下一次结算会用内存累计整行 REPLACE，
+     * 不补入会让刚冲正进数据库的时长被丢弃。匹配按累计键 bookName 精确判等。
+     * 必须在 globalExecutor 线程调用（retryPendingWork）。返回是否补入。
+     */
+    fun addReconciledReadTime(bookName: String, delta: Long): Boolean {
+        val current = book ?: return false
+        if (current.name != bookName) return false
+        readRecord.readTime += delta
+        return true
+    }
+
+    /** 仅供 androidTest 观察内存累计值；业务逻辑不得依赖。 */
+    internal val readTimeForTest: Long get() = readRecord.readTime
 
     /**
      * 清空阅读统计后重置内存累计缓存并重锚计时窗口，
