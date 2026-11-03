@@ -20,7 +20,6 @@ import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.AppWebDav
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ChapterTitleRegistry
-import io.legado.app.help.book.ReadRecordDetailHelper
 import io.legado.app.help.book.getExportFileName
 import io.legado.app.help.book.getRemoteUrl
 import io.legado.app.help.book.isLocal
@@ -395,30 +394,13 @@ class BookInfoViewModel(application: Application) : BaseViewModel(application) {
         changeSourceCoroutine?.cancel()
         changeSourceCoroutine = execute {
             bookSource = source
-            val oldBook = bookData.value
-            oldBook?.migrateTo(book, toc)
+            bookData.value?.migrateTo(book, toc)
             if (inBookshelf) {
                 book.removeType(BookType.updateError)
-                oldBook?.delete()
+                bookData.value?.delete()
                 appDb.bookDao.insert(book)
                 appDb.bookChapterDao.insert(*toc.toTypedArray())
-                oldBook?.let { old ->
-                    val oldName = old.name
-                    val oldAuthor = old.author
-                    // 与计时结算同一单线程队列（FIFO）：先结算旧身份的在途窗口、
-                    // 冲正此前事务失败的待重试窗口，再迁移身份——保证旧身份的最后一笔
-                    // 计时先于迁移落库；迁移成功后注册身份重定向，之后持有旧书籍对象的
-                    // 结算（如朗读切章）仍自动归入新身份，旧身份不再接收计时。
-                    // 迁移失败自动入重试队列，随后续结算重试，不影响换源主流程。
-                    ReadBook.executor.execute {
-                        ReadBook.settleInFlightIfReading(old.bookUrl)
-                        ReadManga.settleInFlightIfReading(old.bookUrl)
-                        ReadRecordDetailHelper.retryPendingWork()
-                        ReadRecordDetailHelper.migrateBookIdentity(
-                            oldName, oldAuthor, book.name, book.author
-                        )
-                    }
-                }
+                // 阅读统计不参与换源：新身份下自然累计新记录，旧身份记录原样保留
             }
             bookData.postValue(book)
             chapterListData.postValue(toc)

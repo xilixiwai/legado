@@ -142,8 +142,10 @@ object ReadManga : CoroutineScope by MainScope() {
     /**
      * 结算当前计时窗口：与 [ReadBook.settleWindow] 同一套语义——
      * 内存累计推进、窗口起点重锚，同一事务写入累计表与每日明细；
-     * 事务失败时窗口进入待冲正队列，由后续成功结算或换源流程补写，
+     * 事务失败时窗口进入待冲正队列，由后续成功结算补写，
      * 保证单次事务失败不会让每日明细永久少记。
+     * 书籍身份按当前 (name, author) 记账：匹配不到已有统计身份时自然创建新记录，
+     * 旧身份记录原样保留，不做自动迁移或合并。
      */
     private fun settleWindow() {
         val windowStart = readStartTime
@@ -154,19 +156,12 @@ object ReadManga : CoroutineScope by MainScope() {
         readStartTime = now
         readRecord.lastRead = now
         val book = this.book
-        // 身份重定向：换源迁移成功后，持有旧书籍对象的结算自动归入新身份
-        val identity = book?.let {
-            ReadRecordDetailHelper.resolveMigratedIdentity(it.name, it.author)
-        }
-        if (identity != null) {
-            readRecord.bookName = identity.first
-        }
         runCatching {
             appDb.runInTransaction {
                 appDb.readRecordDao.insert(readRecord)
-                if (book != null && identity != null) {
+                if (book != null) {
                     ReadRecordDetailHelper.appendWindow(
-                        identity.first, identity.second, book.type, windowStart, now
+                        book.name, book.author, book.type, windowStart, now
                     )
                 }
             }
@@ -179,17 +174,6 @@ object ReadManga : CoroutineScope by MainScope() {
                     book.name, book.author, book.type, windowStart, now
                 )
             }
-        }
-    }
-
-    /**
-     * 立即结算在途窗口（仅当当前正在阅读该书时）。
-     * 供换源流程在 globalExecutor 的同一任务内调用，保证旧身份的最后一笔计时
-     * 先于身份迁移落库，迁移完成后旧身份不再接收计时。
-     */
-    fun settleInFlightIfReading(bookUrl: String) {
-        if (book?.bookUrl == bookUrl && AppConfig.enableReadRecord) {
-            settleWindow()
         }
     }
 
