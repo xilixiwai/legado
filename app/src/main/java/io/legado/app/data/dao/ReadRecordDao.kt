@@ -22,6 +22,9 @@ interface ReadRecordDao {
     @get:Query("select sum(readTime) from readRecord")
     val allTime: Long
 
+    @Query("select * from readRecord where deviceId = :deviceId and bookName = :bookName")
+    fun get(deviceId: String, bookName: String): ReadRecord?
+
     @Query(
         """
         select bookName, sum(readTime) as readTime, max(lastRead) as lastRead 

@@ -8,9 +8,12 @@ import io.legado.app.R
 import io.legado.app.base.adapter.ItemViewHolder
 import io.legado.app.base.adapter.RecyclerAdapter
 import io.legado.app.data.appDb
+import io.legado.app.constant.AppLog
 import io.legado.app.data.entities.ReadRecordShow
 import io.legado.app.databinding.ItemReadRecordBinding
 import io.legado.app.lib.dialogs.alert
+import io.legado.app.model.ReadBook
+import io.legado.app.model.ReadManga
 import io.legado.app.ui.book.search.SearchActivity
 import io.legado.app.utils.startActivityForBook
 import io.legado.app.utils.toReadDuration
@@ -80,10 +83,27 @@ class ReadDataRecordAdapter(context: Context) :
                 yesButton {
                     (context as? LifecycleOwner)?.lifecycleScope?.launch {
                         withContext(Dispatchers.IO) {
-                            // 原累计表按书名存储(历史粒度限制,与旧版行为一致)；
-                            // 每日明细同步按书名清除，保持各 Tab 口径一致
-                            appDb.readRecordDao.deleteByName(item.bookName)
-                            appDb.readRecordDetailDao.deleteByName(item.bookName)
+                            runCatching {
+                                // 与计时结算共用同一单线程执行器：排队中的旧结算先落库再被删除，
+                                // 避免删除与结算交错；删除后重置在读书籍的内存累计，
+                                // 防止下一次结算把删除前的旧值整行写回（数据复活）
+                                ReadBook.executor.submit {
+                                    appDb.runInTransaction {
+                                        // 原累计表按书名存储(历史粒度限制,与旧版行为一致)；
+                                        // 每日明细同步按书名清除，保持各 Tab 口径一致
+                                        appDb.readRecordDao.deleteByName(item.bookName)
+                                        appDb.readRecordDetailDao.deleteByName(item.bookName)
+                                    }
+                                    if (ReadBook.book?.name == item.bookName) {
+                                        ReadBook.resetReadRecordCache()
+                                    }
+                                    if (ReadManga.book?.name == item.bookName) {
+                                        ReadManga.resetReadRecordCache()
+                                    }
+                                }.get()
+                            }.onFailure {
+                                AppLog.put("删除阅读记录失败:${it.localizedMessage}", it)
+                            }
                         }
                         onChanged?.invoke()
                     }

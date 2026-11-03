@@ -171,8 +171,9 @@ object Restore {
         }
         fileToListT<ReadRecord>(path, "readRecord.json")?.let {
             it.forEach { readRecord ->
-                //判断是不是本机记录
-                if (readRecord.deviceId != androidId) {
+                // 空设备号是旧版本本机备份的归属标识（本机写入的累计行 deviceId 为空串），
+                // 与非本机设备行区分开：本机行走较大值合并，避免恢复旧备份静默覆盖本机较新数据
+                if (readRecord.deviceId != androidId && readRecord.deviceId.isNotEmpty()) {
                     appDb.readRecordDao.insert(readRecord)
                 } else {
                     val time = appDb.readRecordDao

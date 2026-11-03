@@ -57,9 +57,9 @@ class ReadDataOverviewFragment : BaseFragment(R.layout.fragment_read_data_overvi
                 val monthStart = today.withDayOfMonth(1)
                 val monthEnd = monthStart.plusMonths(1)
                 val detailDao = appDb.readRecordDetailDao
-                val details = detailDao.all
-                val daysRead = details.asSequence().map { it.date }.distinct().count()
-                val detailSum = details.sumOf { it.readTime }
+                // 聚合查询替代全表加载：天数与总时长只取汇总值，避免随历史增长的全表扫描
+                val daysRead = detailDao.distinctDateCount()
+                val detailSum = detailDao.totalSum ?: 0L
                 val trend = (6 downTo 0).map { offset ->
                     val date = today.minusDays(offset.toLong())
                     val next = date.plusDays(1)

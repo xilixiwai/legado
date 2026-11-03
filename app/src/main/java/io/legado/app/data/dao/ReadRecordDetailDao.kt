@@ -1,6 +1,7 @@
 package io.legado.app.data.dao
 
 import androidx.room.Dao
+import androidx.room.Delete
 import androidx.room.Insert
 import androidx.room.Query
 import androidx.room.Update
@@ -24,6 +25,21 @@ interface ReadRecordDetailDao {
             and bookName = :bookName and bookAuthor = :bookAuthor and date = :date"""
     )
     fun get(deviceId: String, bookName: String, bookAuthor: String, date: String): ReadRecordDetail?
+
+    @Query(
+        """select * from readRecordDetail where deviceId = :deviceId
+            and bookName = :bookName and bookAuthor = :bookAuthor"""
+    )
+    fun getByBook(deviceId: String, bookName: String, bookAuthor: String): List<ReadRecordDetail>
+
+    @Delete
+    fun delete(vararg rows: ReadRecordDetail)
+
+    @get:Query("select sum(readTime) from readRecordDetail")
+    val totalSum: Long?
+
+    @Query("select count(distinct date) from readRecordDetail")
+    fun distinctDateCount(): Int
 
     @Query("select * from readRecordDetail where date >= :start and date < :end")
     fun getByDateRange(start: String, end: String): List<ReadRecordDetail>

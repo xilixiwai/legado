@@ -126,4 +126,49 @@ class ReadRecordDetailHelperTest {
         assertEquals(LocalDate.of(2026, 10, 26), ReadRecordDetailHelper.weekStartOf(LocalDate.of(2026, 11, 1)))
     }
 
+    @Test
+    fun `身份迁移的明细合并且时长求和不丢时间`() {
+        val target = ReadRecordDetail(
+            deviceId = "dev", bookName = "新书名", bookAuthor = "新作者", date = "2026-11-04",
+            readTime = 600_000L, firstReadTime = 9_000_000L, lastReadTime = 9_600_000L, bookType = 8
+        )
+        val incoming = ReadRecordDetail(
+            deviceId = "dev", bookName = "旧书名", bookAuthor = "旧作者", date = "2026-11-04",
+            readTime = 300_000L, firstReadTime = 1_000_000L, lastReadTime = 1_300_000L, bookType = 8
+        )
+        ReadRecordDetailHelper.mergeMigrated(target, incoming)
+        // 求和（与恢复合并取 max 不同：迁移是一次性身份变更，求和才不丢时间）
+        assertEquals(900_000L, target.readTime)
+        assertEquals(1_000_000L, target.firstReadTime)
+        assertEquals(9_600_000L, target.lastReadTime)
+    }
+
+    @Test
+    fun `身份迁移的累计合并且时长求和与最后阅读取新`() {
+        val target = io.legado.app.data.entities.ReadRecord(
+            deviceId = "", bookName = "新书名", readTime = 600_000L, lastRead = 9_000_000L
+        )
+        val incoming = io.legado.app.data.entities.ReadRecord(
+            deviceId = "", bookName = "旧书名", readTime = 300_000L, lastRead = 9_900_000L
+        )
+        ReadRecordDetailHelper.mergeMigrated(target, incoming)
+        assertEquals(900_000L, target.readTime)
+        assertEquals(9_900_000L, target.lastRead)
+    }
+
+    @Test
+    fun `迁移合并的零值首读时间被非零值取代`() {
+        val target = ReadRecordDetail(
+            deviceId = "dev", bookName = "新书名", bookAuthor = "新作者", date = "2026-11-04",
+            readTime = 600_000L, firstReadTime = 0L, lastReadTime = 600_000L, bookType = 0
+        )
+        val incoming = ReadRecordDetail(
+            deviceId = "dev", bookName = "旧书名", bookAuthor = "旧作者", date = "2026-11-04",
+            readTime = 100_000L, firstReadTime = 5_000_000L, lastReadTime = 5_100_000L, bookType = 8
+        )
+        ReadRecordDetailHelper.mergeMigrated(target, incoming)
+        assertEquals(5_000_000L, target.firstReadTime)
+        assertEquals(700_000L, target.readTime)
+    }
+
 }

@@ -1,6 +1,7 @@
 package io.legado.app.help.book
 
 import io.legado.app.constant.AppConst
+import io.legado.app.constant.AppLog
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.ReadRecordDetail
@@ -117,6 +118,87 @@ object ReadRecordDetailHelper {
             changed = true
         }
         return changed
+    }
+
+    /**
+     * 身份迁移时的同键合并：同一本书换源前后是同一段连续阅读，时长**求和**而非取较大值
+     * （与恢复合并取 max 的幂等语义不同：迁移只会发生一次，求和才不丢时间）。
+     * firstReadTime 取非零较小值；lastReadTime 取 max；bookType 保持 target 现值。
+     */
+    fun mergeMigrated(target: ReadRecordDetail, incoming: ReadRecordDetail) {
+        target.readTime += incoming.readTime
+        if (incoming.firstReadTime in 1 until target.firstReadTime || target.firstReadTime <= 0) {
+            target.firstReadTime = incoming.firstReadTime
+        }
+        if (incoming.lastReadTime > target.lastReadTime) {
+            target.lastReadTime = incoming.lastReadTime
+        }
+    }
+
+    /** 累计表迁移合并：同设备同书名是同一段连续阅读，时长求和，lastRead 取 max。 */
+    fun mergeMigrated(target: io.legado.app.data.entities.ReadRecord, incoming: io.legado.app.data.entities.ReadRecord) {
+        target.readTime += incoming.readTime
+        if (incoming.lastRead > target.lastRead) {
+            target.lastRead = incoming.lastRead
+        }
+    }
+
+    /**
+     * 书籍身份迁移：换源/重命名导致 (bookName, bookAuthor) 变化时，
+     * 把本机的阅读统计迁到新身份下，保证同一本书的统计连续。
+     *
+     * - 每日明细：迁移本机分区（deviceId = androidId）的全部日期行，按日期撞键求和合并；
+     * - 累计表：本机历史行 deviceId 为空串，仅在书名变化时迁移（累计表按书名存储），
+     *   撞键求和合并；其他设备分区的行不迁移（那是其他设备的书籍副本）。
+     * - 全程独立事务，失败只记日志，不影响换源主流程（等同于保持旧行为）。
+     * - db 参数可注入（默认 appDb），供 androidTest 使用内存库验证。
+     */
+    fun migrateBookIdentity(
+        oldName: String,
+        oldAuthor: String,
+        newName: String,
+        newAuthor: String,
+        db: io.legado.app.data.AppDatabase = appDb
+    ) {
+        if (oldName == newName && oldAuthor == newAuthor) return
+        runCatching {
+            db.runInTransaction {
+                val detailDao = db.readRecordDetailDao
+                val oldRows = detailDao.getByBook(AppConst.androidId, oldName, oldAuthor)
+                for (oldRow in oldRows) {
+                    val target = detailDao.get(
+                        AppConst.androidId, newName, newAuthor, oldRow.date
+                    )
+                    if (target == null) {
+                        detailDao.insert(
+                            oldRow.copy(bookName = newName, bookAuthor = newAuthor)
+                        )
+                    } else {
+                        mergeMigrated(target, oldRow)
+                        detailDao.update(target)
+                    }
+                    detailDao.delete(oldRow)
+                }
+                if (oldName != newName) {
+                    val recordDao = db.readRecordDao
+                    // 本机历史累计行的 deviceId 为空串（ReadBook/ReadManga 的默认值）
+                    val oldRecord = recordDao.get("", oldName)
+                    if (oldRecord != null) {
+                        val target = recordDao.get("", newName)
+                        if (target == null) {
+                            oldRecord.bookName = newName
+                            recordDao.insert(oldRecord)
+                        } else {
+                            mergeMigrated(target, oldRecord)
+                            recordDao.update(target)
+                        }
+                        recordDao.delete(oldRecord)
+                    }
+                }
+            }
+        }.onFailure {
+            AppLog.put("书籍身份迁移阅读统计失败:${it.localizedMessage}", it)
+        }
     }
 
     /**

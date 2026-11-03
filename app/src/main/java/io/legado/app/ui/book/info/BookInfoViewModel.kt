@@ -20,6 +20,7 @@ import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.AppWebDav
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ChapterTitleRegistry
+import io.legado.app.help.book.ReadRecordDetailHelper
 import io.legado.app.help.book.getExportFileName
 import io.legado.app.help.book.getRemoteUrl
 import io.legado.app.help.book.isLocal
@@ -394,12 +395,20 @@ class BookInfoViewModel(application: Application) : BaseViewModel(application) {
         changeSourceCoroutine?.cancel()
         changeSourceCoroutine = execute {
             bookSource = source
-            bookData.value?.migrateTo(book, toc)
+            val oldBook = bookData.value
+            oldBook?.migrateTo(book, toc)
             if (inBookshelf) {
                 book.removeType(BookType.updateError)
-                bookData.value?.delete()
+                oldBook?.delete()
                 appDb.bookDao.insert(book)
                 appDb.bookChapterDao.insert(*toc.toTypedArray())
+                // 换源后书名/作者变化时，把本机阅读统计迁移到新身份，保持同一本书统计连续；
+                // 迁移失败只记日志，不影响换源主流程
+                oldBook?.let {
+                    ReadRecordDetailHelper.migrateBookIdentity(
+                        it.name, it.author, book.name, book.author
+                    )
+                }
             }
             bookData.postValue(book)
             chapterListData.postValue(toc)
