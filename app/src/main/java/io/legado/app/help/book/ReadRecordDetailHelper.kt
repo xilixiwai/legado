@@ -50,6 +50,16 @@ object ReadRecordDetailHelper {
     private val pendingMigrations = ArrayDeque<Array<String>>()
     private val identityRedirects = HashMap<Pair<String, String>, Pair<String, String>>()
 
+    /** 身份迁移待重试任务的持久化文件；测试可注入临时目录隔离 */
+    private val defaultMigrationStore: PendingMigrationFileStore by lazy {
+        PendingMigrationFileStore(
+            java.io.File(splitties.init.appCtx.filesDir, "pending_identity_migrations.json")
+        )
+    }
+    internal var migrationStoreForTest: PendingMigrationFileStore? = null
+    private val migrationStore: PendingMigrationFileStore
+        get() = migrationStoreForTest ?: defaultMigrationStore
+
     /**
      * 每周从周一开始：返回 date 所在周的周一（含当天为周一的情形）。
      * 纯函数，周统计口径统一收敛于此。
@@ -195,7 +205,38 @@ object ReadRecordDetailHelper {
         for (migration in pendingMigrations.toList()) {
             if (doMigrateBookIdentity(migration[0], migration[1], migration[2], migration[3], db)) {
                 pendingMigrations.remove(migration)
+                migrationStore.save(pendingMigrations.toList())
             }
+        }
+    }
+
+    /**
+     * 应用启动恢复：从持久化文件重新发现未完成的身份迁移并入队重试。
+     * 恢复依据是换源当时记录的确定性身份对，不做任何书名/作者推断；
+     * 重试幂等（迁移以搬走旧行实现），数据库不可用时任务保留在队列与文件中。
+     * 内部投递到 globalExecutor 串行执行，可在应用启动的异步初始化中直接调用。
+     */
+    fun recoverPendingMigrations(db: io.legado.app.data.AppDatabase = appDb) {
+        ReadBook.executor.execute {
+            recoverPendingMigrationsSync(db)
+        }
+    }
+
+    internal fun recoverPendingMigrationsSync(db: io.legado.app.data.AppDatabase = appDb) {
+        val stored = migrationStore.load()
+        for (entry in stored) {
+            val duplicate = pendingMigrations.any { existing ->
+                existing.size == 4 && existing[0] == entry.getOrNull(0) &&
+                        existing[1] == entry.getOrNull(1) &&
+                        existing[2] == entry.getOrNull(2) &&
+                        existing[3] == entry.getOrNull(3)
+            }
+            if (!duplicate) {
+                pendingMigrations.addLast(entry)
+            }
+        }
+        if (pendingMigrations.isNotEmpty()) {
+            retryPendingWork(db)
         }
     }
 
@@ -267,6 +308,8 @@ object ReadRecordDetailHelper {
     ) {
         if (!doMigrateBookIdentity(oldName, oldAuthor, newName, newAuthor, db)) {
             pendingMigrations.addLast(arrayOf(oldName, oldAuthor, newName, newAuthor))
+            // 持久化到文件：进程重启后仍能重新发现该任务（recoverPendingMigrations）
+            migrationStore.save(pendingMigrations.toList())
             AppLog.put("书籍身份迁移失败待重试:$oldName → $newName")
         }
     }
@@ -357,25 +400,33 @@ object ReadRecordDetailHelper {
      * 必须与计时写入在同一个单线程执行器（globalExecutor）上排队执行：
      * FIFO 保证此前已排队的结算先落库、随后被本次清空一并清除；
      * 排队中的结算在执行时读取到已重锚的窗口起点，只会写入清空之后的阅读。
-     * 事务内同时重置阅读模型单例的内存累计缓存、丢弃待冲正窗口与待重试迁移，
-     * 防止清空前的旧数据（含事务失败未落库的窗口）在清空后写回。
+     *
+     * 数据库清空提交并复核通过后，才在同一执行器任务内重置内存累计缓存、
+     * 丢弃待冲正窗口与待重试迁移（整个任务期间无其他任务可交错，串行等价于事务内重置）。
+     * 若清空事务失败或复核失败：内存累计、待冲正窗口、迁移任务全部原样保留，
+     * 数据库保持最近一次成功状态——后续结算与冲正继续收敛，旧数据既不复活也不丢失。
      *
      * @param callback 在执行器线程回调，true 表示清空成功并已复核两表为空；
      *                 失败时调用方须明确提示，不得显示虚假成功状态。
      */
-    fun clearAllStatistics(callback: (Boolean) -> Unit) {
+    fun clearAllStatistics(
+        db: io.legado.app.data.AppDatabase = appDb,
+        callback: (Boolean) -> Unit
+    ) {
         ReadBook.executor.execute {
             val ok = runCatching {
-                appDb.runInTransaction {
-                    appDb.readRecordDao.clear()
-                    appDb.readRecordDetailDao.clear()
-                    ReadBook.resetReadRecordCache()
-                    ReadManga.resetReadRecordCache()
-                    pendingStats.clear()
-                    pendingMigrations.clear()
+                db.runInTransaction {
+                    db.readRecordDao.clear()
+                    db.readRecordDetailDao.clear()
                 }
-                // 复核两张表确已清空（防异常路径部分写入）
-                appDb.readRecordDao.allTime == 0L && appDb.readRecordDetailDao.all.isEmpty()
+                // 复核两表确已清空（防异常路径部分写入）
+                check(db.readRecordDao.allTime == 0L && db.readRecordDetailDao.all.isEmpty())
+                ReadBook.resetReadRecordCache()
+                ReadManga.resetReadRecordCache()
+                pendingStats.clear()
+                pendingMigrations.clear()
+                migrationStore.clear()
+                true
             }.getOrElse { false }
             callback(ok)
         }

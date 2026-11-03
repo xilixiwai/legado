@@ -23,6 +23,7 @@ import org.junit.runner.RunWith
 class ReadRecordDetailDbTest {
 
     private lateinit var db: AppDatabase
+    private var testStoreFile: java.io.File? = null
 
     @Before
     fun setup() {
@@ -30,11 +31,19 @@ class ReadRecordDetailDbTest {
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
+        // 身份迁移持久化文件定向到测试缓存目录，避免污染应用真实待迁移状态
+        val storeFile = java.io.File(context.cacheDir, "test_pending_migrations.json")
+        storeFile.delete()
+        io.legado.app.help.book.ReadRecordDetailHelper.migrationStoreForTest =
+            io.legado.app.help.book.PendingMigrationFileStore(storeFile)
+        testStoreFile = storeFile
     }
 
     @After
     fun tearDown() {
         db.close()
+        io.legado.app.help.book.ReadRecordDetailHelper.migrationStoreForTest = null
+        testStoreFile?.delete()
     }
 
     private fun row(
@@ -399,6 +408,146 @@ class ReadRecordDetailDbTest {
         assertEquals(0, db.readRecordDao.all.size)
         // 书籍本身不受影响
         assertEquals(1, db.bookDao.all.size)
+    }
+
+    @Test
+    fun migrationFailurePersistsAndRecovers() {
+        val androidId = io.legado.app.constant.AppConst.androidId
+        db.readRecordDetailDao.insert(
+            row(deviceId = androidId, bookName = "恢复旧名", bookAuthor = "作者", readTime = 70_000L)
+        )
+        // 用触发器在明细删除时制造失败，模拟迁移事务失败
+        val support = db.openHelper.writableDatabase
+        support.execSQL(
+            "create trigger fail_migration before delete on readRecordDetail " +
+                    "begin select raise(abort, 'simulated failure'); end"
+        )
+        io.legado.app.help.book.ReadRecordDetailHelper.migrateBookIdentity(
+            "恢复旧名", "作者", "恢复新名", "作者", db
+        )
+        // 失败：数据完整保留在旧身份下，任务已持久化到文件
+        assertEquals(1, db.readRecordDetailDao.getByBook(androidId, "恢复旧名", "作者").size)
+        val storeFile = testStoreFile!!
+        assertTrue(storeFile.exists())
+        // 模拟进程重启：新存储实例读同一文件重新发现任务，且依据是换源时记录的旧→新身份对
+        val reloaded = io.legado.app.help.book.PendingMigrationFileStore(storeFile).load()
+        assertEquals(1, reloaded.size)
+        assertEquals("恢复旧名", reloaded[0][0])
+        assertEquals("恢复新名", reloaded[0][2])
+        support.execSQL("drop trigger fail_migration")
+        // 重启后恢复重试成功
+        io.legado.app.help.book.ReadRecordDetailHelper.recoverPendingMigrationsSync(db)
+        assertEquals(0, db.readRecordDetailDao.getByBook(androidId, "恢复旧名", "作者").size)
+        assertEquals(
+            70_000L,
+            db.readRecordDetailDao.getByBook(androidId, "恢复新名", "作者").sumOf { it.readTime }
+        )
+        // 成功后持久化状态清除；再次恢复不重复迁移
+        assertFalse(storeFile.exists())
+        io.legado.app.help.book.ReadRecordDetailHelper.recoverPendingMigrationsSync(db)
+        assertEquals(
+            70_000L,
+            db.readRecordDetailDao.getByBook(androidId, "恢复新名", "作者").sumOf { it.readTime }
+        )
+    }
+
+    @Test
+    fun clearFailureKeepsPendingWorkAndData() {
+        db.readRecordDao.insert(
+            io.legado.app.data.entities.ReadRecord().apply {
+                deviceId = ""; bookName = "清空书"; readTime = 50_000L
+            }
+        )
+        db.readRecordDetailDao.insert(row(bookName = "清空书", readTime = 20_000L))
+        io.legado.app.help.book.ReadRecordDetailHelper.enqueuePendingStat(
+            "清空书", "作者", 8, 3_000_000L, 3_100_000L
+        )
+        // 触发器让清空事务失败
+        val support = db.openHelper.writableDatabase
+        support.execSQL(
+            "create trigger fail_clear before delete on readRecord " +
+                    "begin select raise(abort, 'simulated failure'); end"
+        )
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var ok = true
+        io.legado.app.help.book.ReadRecordDetailHelper.clearAllStatistics(db) { result ->
+            ok = result
+            latch.countDown()
+        }
+        latch.await(10, java.util.concurrent.TimeUnit.SECONDS)
+        assertFalse("清空事务应失败", ok)
+        support.execSQL("drop trigger fail_clear")
+        // 数据库整体回滚：旧数据原样保留
+        assertEquals(50_000L, db.readRecordDao.get("", "清空书")?.readTime)
+        // 待冲正窗口未被提前丢弃：重试仍然生效（旧数据 + 冲正窗口）
+        io.legado.app.help.book.ReadRecordDetailHelper.retryPendingWork(db)
+        assertEquals(60_000L, db.readRecordDao.get("", "清空书")?.readTime)
+        assertEquals(30_000L, db.readRecordDetailDao.all.sumOf { it.readTime })
+    }
+
+    @Test
+    fun clearSuccessDropsPendingAndAllowsNewReading() {
+        db.readRecordDao.insert(
+            io.legado.app.data.entities.ReadRecord().apply {
+                deviceId = ""; bookName = "清空书"; readTime = 50_000L
+            }
+        )
+        db.readRecordDetailDao.insert(row(bookName = "清空书", readTime = 20_000L))
+        io.legado.app.help.book.ReadRecordDetailHelper.enqueuePendingStat(
+            "清空书", "作者", 8, 3_000_000L, 3_100_000L
+        )
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var ok = false
+        io.legado.app.help.book.ReadRecordDetailHelper.clearAllStatistics(db) { result ->
+            ok = result
+            latch.countDown()
+        }
+        latch.await(10, java.util.concurrent.TimeUnit.SECONDS)
+        assertTrue(ok)
+        assertEquals(0, db.readRecordDao.all.size)
+        assertEquals(0, db.readRecordDetailDao.all.size)
+        // 清空前的待冲正窗口与迁移任务不复活
+        io.legado.app.help.book.ReadRecordDetailHelper.retryPendingWork(db)
+        assertEquals(0, db.readRecordDetailDao.all.size)
+        assertEquals(0, db.readRecordDao.all.size)
+        assertFalse(testStoreFile!!.exists())
+        // 清空后新阅读正常记录
+        db.readRecordDao.insert(
+            io.legado.app.data.entities.ReadRecord().apply {
+                deviceId = ""; bookName = "清空书"; readTime = 5_000L
+            }
+        )
+        db.readRecordDetailDao.insert(row(bookName = "清空书", readTime = 5_000L))
+        assertEquals(5_000L, db.readRecordDao.all[0].readTime)
+        assertEquals(1, db.readRecordDetailDao.all.size)
+    }
+
+    @Test
+    fun identityRedirectIsolatesSameNameDifferentAuthor() {
+        val androidId = io.legado.app.constant.AppConst.androidId
+        db.readRecordDetailDao.insert(
+            row(deviceId = androidId, bookName = "同名书", bookAuthor = "作者甲", readTime = 10_000L)
+        )
+        // 只迁移（同名书，作者甲）；重定向键含作者，不波及同名不同作者
+        io.legado.app.help.book.ReadRecordDetailHelper.migrateBookIdentity(
+            "同名书", "作者甲", "改名书", "作者甲", db
+        )
+        io.legado.app.help.book.ReadRecordDetailHelper.appendWindow(
+            "同名书", "作者乙", 0, 4_000_000L, 4_100_000L, db
+        )
+        assertEquals(
+            10_000L,
+            db.readRecordDetailDao.getByBook(androidId, "改名书", "作者甲").sumOf { it.readTime }
+        )
+        assertEquals(
+            100_000L,
+            db.readRecordDetailDao.getByBook(androidId, "同名书", "作者乙").sumOf { it.readTime }
+        )
+        // 不确定身份的记录不会被自动合并：旧键（同名书，作者乙）原样保留
+        assertEquals(
+            0,
+            db.readRecordDetailDao.getByBook(androidId, "改名书", "作者乙").size
+        )
     }
 
 }
