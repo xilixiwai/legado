@@ -8,6 +8,7 @@ import android.widget.TextView
 import androidx.core.graphics.ColorUtils
 import androidx.core.view.isVisible
 import androidx.lifecycle.lifecycleScope
+import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import io.legado.app.R
@@ -15,6 +16,7 @@ import io.legado.app.base.BaseFragment
 import io.legado.app.base.adapter.ItemViewHolder
 import io.legado.app.base.adapter.RecyclerAdapter
 import io.legado.app.data.appDb
+import io.legado.app.help.book.ReadRecordDetailHelper
 import io.legado.app.data.entities.ReadRecordDetail
 import io.legado.app.databinding.ItemReadDataCalendarDayBinding
 import io.legado.app.lib.theme.primaryColor
@@ -44,7 +46,7 @@ class ReadDataCalendarFragment : BaseFragment(R.layout.fragment_read_data_calend
             loadMonth()
         }
     }
-    private val detailAdapter by lazy { ReadDataRankAdapter(requireContext()) }
+    private val detailAdapter by lazy { ReadDataRankAdapter(requireContext(), openDetails = false) }
     private val monthTitleFormat = DateTimeFormatter.ofPattern("yyyy年MM月")
     private val dayTitleFormat = DateTimeFormatter.ofPattern("M月d日")
 
@@ -53,7 +55,10 @@ class ReadDataCalendarFragment : BaseFragment(R.layout.fragment_read_data_calend
             layoutManager = GridLayoutManager(requireContext(), 7)
             adapter = dayAdapter
         }
-        view.findViewById<RecyclerView>(R.id.rv_day_detail).adapter = detailAdapter
+        view.findViewById<RecyclerView>(R.id.rv_day_detail).run {
+            layoutManager = LinearLayoutManager(requireContext())
+            adapter = detailAdapter
+        }
         view.findViewById<View>(R.id.tv_month_prev).setOnClickListener {
             currentMonth = currentMonth.minusMonths(1)
             loadMonth()
@@ -80,6 +85,7 @@ class ReadDataCalendarFragment : BaseFragment(R.layout.fragment_read_data_calend
             val monthStart = currentMonth.atDay(1)
             val monthEnd = currentMonth.plusMonths(1).atDay(1)
             val result = withContext(Dispatchers.IO) {
+                ReadRecordDetailHelper.awaitPendingWrites()
                 val dao = appDb.readRecordDetailDao
                 val rows = dao.getByDateRange(monthStart.toString(), monthEnd.toString())
                 val byDate = rows.groupBy { it.date }.mapValues { (_, list) ->

@@ -162,8 +162,7 @@ class MyFragment() : BaseFragment(R.layout.fragment_my_config), MainFragmentInte
                 }
 
                 "fileManage" -> startActivity<FileManageActivity>()
-                "readRecord" -> startActivity<ReadDataCenterActivity>()
-                "readingStatistics" -> startActivity<ReadDataCenterActivity>()
+                "readDataCenter" -> startActivity<ReadDataCenterActivity>()
                 "about" -> startActivity<AboutActivity>()
                 "exit" -> activity?.finish()
             }

@@ -696,7 +696,7 @@ abstract class BaseReadAloudService : BaseService(),
     }
 
     open fun nextChapter() {
-        ReadBook.upReadTime()
+        ReadBook.upReadTime(includeBackground = true)
         AppLog.putDebug("${ReadBook.curTextChapter?.chapter?.title} 朗读结束跳转下一章并朗读")
         resumeReadAloudInternal()
         if (!ReadBook.moveToNextChapter(true)) {

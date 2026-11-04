@@ -32,7 +32,9 @@ import java.sql.DriverManager
 internal object RealSqliteSupport {
 
     /** 从 Room 导出的 schema 里取最新版本的相关表建表语句（含索引） */
-    fun productionDdl(): List<String> {
+    fun productionDdl(
+        tables: List<String> = listOf("books", "chapters", "bookmarks", "readRecord")
+    ): List<String> {
         val dirs = listOf(
             File("schemas/io.legado.app.data.AppDatabase"),
             File("app/schemas/io.legado.app.data.AppDatabase"),
@@ -46,7 +48,7 @@ internal object RealSqliteSupport {
 
         val root = JsonParser.parseString(schema.readText()).asJsonObject
         val entities = root.getAsJsonObject("database").getAsJsonArray("entities")
-        val wanted = listOf("books", "chapters", "bookmarks", "readRecord")
+        val wanted = tables
         val found = LinkedHashMap<String, MutableList<String>>()
         entities.forEach { element ->
             val entity = element.asJsonObject
@@ -67,12 +69,14 @@ internal object RealSqliteSupport {
     }
 
     /** 内存库 + 生产 schema + 外键开启（与 Room 的默认行为一致） */
-    fun open(): Connection {
+    fun open(
+        tables: List<String> = listOf("books", "chapters", "bookmarks", "readRecord")
+    ): Connection {
         Class.forName("org.sqlite.JDBC")
         val connection = DriverManager.getConnection("jdbc:sqlite::memory:")
         connection.createStatement().use { statement ->
             statement.execute("PRAGMA foreign_keys = ON")
-            productionDdl().forEach { statement.execute(it) }
+            productionDdl(tables).forEach { statement.execute(it) }
         }
         return connection
     }

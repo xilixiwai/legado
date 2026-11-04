@@ -1161,6 +1161,7 @@
     <string name="statistics_clear_record">Clear reading records</string>
     <string name="statistics_empty">No reading data yet</string>
     <string name="read_data_center">Reading data center</string>
+    <string name="read_data_center_summary">Reading time, calendar and book rankings</string>
     <string name="read_data_tab_overview">Overview</string>
     <string name="read_data_tab_calendar">Calendar</string>
     <string name="read_data_tab_rank">Ranking</string>

@@ -1158,6 +1158,7 @@
     <string name="statistics_clear_record">清空阅读记录</string>
     <string name="statistics_empty">暂无阅读数据</string>
     <string name="read_data_center">阅读数据中心</string>
+    <string name="read_data_center_summary">阅读时长、阅读日历与书籍排行</string>
     <string name="read_data_tab_overview">总览</string>
     <string name="read_data_tab_calendar">日历</string>
     <string name="read_data_tab_rank">排行</string>

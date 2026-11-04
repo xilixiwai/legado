@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="read_overview_today">今日</string>
+    <string name="read_overview_today_time">今日阅读</string>
+    <string name="read_overview_books">书架书籍</string>
+    <string name="read_overview_periods">阅读习惯</string>
+    <string name="read_overview_average_note">日均 = 每日明细总时长 ÷ 有记录的天数。每日明细自新版开始积累，不回填历史累计时长。</string>
+    <string name="read_overview_trend_hint">点击日期查看时长 · 空心标记表示未阅读</string>
+    <string name="read_overview_trend_selected">%1$s · %2$s</string>
+    <string name="read_overview_trend_scale">刻度：0 — %1$s</string>
+    <string name="read_overview_trend_empty">近 7 天暂无阅读</string>
+    <string name="read_overview_recent_empty">暂无最近阅读</string>
+    <string name="read_overview_saved_note">已保存的阅读时长</string>
+</resources>

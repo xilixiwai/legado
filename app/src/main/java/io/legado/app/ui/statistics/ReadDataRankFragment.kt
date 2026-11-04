@@ -2,7 +2,6 @@ package io.legado.app.ui.statistics
 
 import android.os.Bundle
 import android.view.View
-import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.view.isVisible
 import androidx.lifecycle.lifecycleScope
@@ -12,8 +11,12 @@ import io.legado.app.R
 import io.legado.app.base.BaseFragment
 import io.legado.app.data.appDb
 import io.legado.app.help.book.ReadRecordDetailHelper
+import io.legado.app.help.config.LocalConfig
 import io.legado.app.lib.theme.primaryTextColor
+import io.legado.app.lib.theme.secondaryTextColor
+import io.legado.app.utils.putInt
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.LocalDate
@@ -27,14 +30,46 @@ class ReadDataRankFragment : BaseFragment(R.layout.fragment_read_data_rank) {
 
     private var period = 0 // 0=累计 1=本周 2=本月
     private var type = 0 // 0=全部 1=小说 2=漫画
-    private val rankAdapter by lazy { ReadDataRankAdapter(requireContext()) }
+    private var searchKey = ""
+    private var loadJob: Job? = null
+    private var sortMode: Int
+        get() = LocalConfig.getInt("readDataRankSort", 1)
+        set(value) { LocalConfig.putInt("readDataRankSort", value) }
+    private val rankAdapter by lazy { ReadDataRankAdapter(requireContext(), openDetails = false) }
 
     override fun onFragmentCreated(view: View, savedInstanceState: Bundle?) {
+        period = savedInstanceState?.getInt("period") ?: period
+        type = savedInstanceState?.getInt("type") ?: type
+        searchKey = savedInstanceState?.getString("searchKey") ?: searchKey
         view.findViewById<RecyclerView>(R.id.recycler_view).run {
             layoutManager = LinearLayoutManager(requireContext())
             adapter = rankAdapter
         }
+        rankAdapter.onDelete = { item ->
+            confirmDeleteReadData(requireContext(), item.bookName) {
+                (activity as? ReadDataCenterActivity)?.refreshAll()
+            }
+        }
         bindChips(view)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putInt("period", period)
+        outState.putInt("type", type)
+        outState.putString("searchKey", searchKey)
+    }
+
+    fun setSearchKey(key: String?) {
+        searchKey = key.orEmpty()
+        reload()
+    }
+
+    fun sortModeMenuChecked(): Int = sortMode
+
+    fun onSortSelected(mode: Int) {
+        sortMode = mode
+        reload()
     }
 
     override fun onResume() {
@@ -43,7 +78,7 @@ class ReadDataRankFragment : BaseFragment(R.layout.fragment_read_data_rank) {
     }
 
     fun reload() {
-        if (isAdded) {
+        if (isAdded && view != null) {
             loadRank()
         }
     }
@@ -62,13 +97,13 @@ class ReadDataRankFragment : BaseFragment(R.layout.fragment_read_data_rank) {
         fun refreshChips() {
             periodChips.forEachIndexed { index, chip ->
                 chip.setTextColor(
-                    if (index == period) requireContext().primaryTextColor else chip.currentTextColor
+                    if (index == period) requireContext().primaryTextColor else requireContext().secondaryTextColor
                 )
                 chip.paint.isFakeBoldText = index == period
             }
             typeChips.forEachIndexed { index, chip ->
                 chip.setTextColor(
-                    if (index == type) requireContext().primaryTextColor else chip.currentTextColor
+                    if (index == type) requireContext().primaryTextColor else requireContext().secondaryTextColor
                 )
                 chip.paint.isFakeBoldText = index == type
             }
@@ -91,15 +126,21 @@ class ReadDataRankFragment : BaseFragment(R.layout.fragment_read_data_rank) {
     }
 
     private fun loadRank() {
-        lifecycleScope.launch {
+        loadJob?.cancel()
+        val query = searchKey
+        val order = sortMode
+        val selectedPeriod = period
+        val selectedType = type
+        loadJob = viewLifecycleOwner.lifecycleScope.launch {
             val shows = withContext(Dispatchers.IO) {
+                ReadRecordDetailHelper.awaitPendingWrites()
                 val today = LocalDate.now()
-                when (period) {
+                when (selectedPeriod) {
                     1 -> {
                         val start = ReadRecordDetailHelper.weekStartOf(today)
                         val end = start.plusWeeks(1)
                         appDb.readRecordDetailDao.rankRange(start.toString(), end.toString())
-                            .filterType().map {
+                            .filterType(selectedType).map {
                                 ReadDataBookShow.fromRank(
                                     it.bookName, it.bookAuthor, it.readTime,
                                     it.lastReadTime, it.bookType
@@ -111,7 +152,7 @@ class ReadDataRankFragment : BaseFragment(R.layout.fragment_read_data_rank) {
                         val start = today.withDayOfMonth(1)
                         val end = start.plusMonths(1)
                         appDb.readRecordDetailDao.rankRange(start.toString(), end.toString())
-                            .filterType().map {
+                            .filterType(selectedType).map {
                                 ReadDataBookShow.fromRank(
                                     it.bookName, it.bookAuthor, it.readTime,
                                     it.lastReadTime, it.bookType
@@ -125,7 +166,7 @@ class ReadDataRankFragment : BaseFragment(R.layout.fragment_read_data_rank) {
                             val book = appDb.bookDao.findByName(show.bookName).firstOrNull()
                             val bookType = book?.type ?: io.legado.app.constant.BookType.text
                             val isManga = bookType and io.legado.app.constant.BookType.image != 0
-                            val match = when (type) {
+                            val match = when (selectedType) {
                                 1 -> !isManga
                                 2 -> isManga
                                 else -> true
@@ -146,20 +187,21 @@ class ReadDataRankFragment : BaseFragment(R.layout.fragment_read_data_rank) {
                             }
                         }.sortedByDescending { it.readTime }
                     }
-                }
+                }.filterAndSortReadData(query, order)
             }
             val rootView = view ?: return@launch
             rankAdapter.setItems(shows)
+            rootView.findViewById<RecyclerView>(R.id.recycler_view).isVisible = shows.isNotEmpty()
             rootView.findViewById<TextView>(R.id.tv_empty).isVisible = shows.isEmpty()
         }
     }
 
-    private fun List<io.legado.app.data.entities.DetailBookRankShow>.filterType():
+    private fun List<io.legado.app.data.entities.DetailBookRankShow>.filterType(selectedType: Int):
             List<io.legado.app.data.entities.DetailBookRankShow> {
-        if (type == 0) return this
+        if (selectedType == 0) return this
         return filter {
             val isManga = it.isManga
-            if (type == 1) !isManga else isManga
+            if (selectedType == 1) !isManga else isManga
         }
     }
 

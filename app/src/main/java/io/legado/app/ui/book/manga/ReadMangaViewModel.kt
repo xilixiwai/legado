@@ -46,6 +46,7 @@ class ReadMangaViewModel(application: Application) : BaseViewModel(application) 
      * 初始化
      */
     fun initData(intent: Intent, success: (() -> Unit)? = null) {
+        ReadManga.prepareReading(intent.getStringExtra("bookUrl"))
         execute {
             ReadManga.inBookshelf = intent.getBooleanExtra("inBookshelf", true)
             ReadManga.chapterChanged = intent.getBooleanExtra("chapterChanged", false)

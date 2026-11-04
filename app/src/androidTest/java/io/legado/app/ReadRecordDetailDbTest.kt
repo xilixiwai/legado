@@ -605,4 +605,76 @@ class ReadRecordDetailDbTest {
         assertEquals(1_000L, io.legado.app.model.ReadBook.readTimeForTest)
     }
 
+    /** 直接驱动生产 settleWindow + Room，不再只手写“等价”结算。 */
+    @Test
+    fun actualNovelAndMangaSettlementPersistsSixtyAndNinetySeconds() {
+        val start = 1_794_000_000_000L
+        for (manga in listOf(false, true)) {
+            val identity = io.legado.app.help.book.ReadingTimeIdentity(
+                if (manga) "计时漫画" else "计时小说", "作者", if (manga) 8 else 0
+            )
+            val timer = modelTimer(manga)
+            timer.bind(identity, start)
+            timer.resume(start)
+            timer.checkpoint(start + 1_000L)
+            timer.pause(start + 60_000L)
+            assertEquals(60_000L, db.readRecordDao.getOwnReadTime(identity.name))
+            assertEquals(60_000L, db.readRecordDetailDao.all.filter { it.bookName == identity.name }.sumOf { it.readTime })
+            timer.resume(start + 360_000L)
+            timer.checkpoint(start + 375_000L)
+            timer.pause(start + 390_000L)
+            assertEquals(90_000L, db.readRecordDao.getOwnReadTime(identity.name))
+            assertEquals(90_000L, db.readRecordDetailDao.all.filter { it.bookName == identity.name }.sumOf { it.readTime })
+        }
+    }
+
+    @Test
+    fun actualSettlementFailureRetryAndSwitchDoNotDoubleCount() {
+        val start = 1_794_000_000_000L
+        for (manga in listOf(false, true)) {
+            val identity = io.legado.app.help.book.ReadingTimeIdentity(
+                if (manga) "失败漫画" else "失败小说", "作者", if (manga) 8 else 0
+            )
+            val timer = modelTimer(manga)
+            timer.bind(identity, start)
+            timer.resume(start)
+            db.openHelper.writableDatabase.execSQL(
+                "CREATE TRIGGER fail_timing BEFORE INSERT ON readRecordDetail BEGIN SELECT RAISE(ABORT, 'test failure'); END"
+            )
+            timer.checkpoint(start + 15_000L)
+            assertNull(db.readRecordDao.getOwnReadTime(identity.name))
+            assertEquals(0L, if (manga) io.legado.app.model.ReadManga.readTimeForTest else io.legado.app.model.ReadBook.readTimeForTest)
+            io.legado.app.help.book.ReadRecordDetailHelper.retryPendingWork(db)
+            assertNull(db.readRecordDao.getOwnReadTime(identity.name))
+            db.openHelper.writableDatabase.execSQL("DROP TRIGGER fail_timing")
+            timer.checkpoint(start + 30_000L)
+            assertEquals(30_000L, db.readRecordDao.getOwnReadTime(identity.name))
+            assertEquals(30_000L, if (manga) io.legado.app.model.ReadManga.readTimeForTest else io.legado.app.model.ReadBook.readTimeForTest)
+            io.legado.app.help.book.ReadRecordDetailHelper.retryPendingWork(db)
+            timer.bind(identity.copy(name = identity.name + "B"), start + 60_000L)
+            timer.pause(start + 150_000L)
+            assertEquals(60_000L, db.readRecordDao.getOwnReadTime(identity.name))
+            assertEquals(90_000L, db.readRecordDao.getOwnReadTime(identity.name + "B"))
+            assertEquals(60_000L, db.readRecordDetailDao.all.filter { it.bookName == identity.name }.sumOf { it.readTime })
+        }
+    }
+
+    private fun modelTimer(manga: Boolean) =
+        io.legado.app.help.book.ReadingSessionTimer<io.legado.app.help.book.ReadingTimeIdentity>(
+            onIdentityChanged = { identity ->
+                val book = io.legado.app.data.entities.Book(name = identity.name, author = identity.author, type = identity.type)
+                if (manga) {
+                    io.legado.app.model.ReadManga.book = book
+                    io.legado.app.model.ReadManga.loadReadRecord(identity, db)
+                } else {
+                    io.legado.app.model.ReadBook.book = book
+                    io.legado.app.model.ReadBook.loadReadRecord(identity, db)
+                }
+            },
+            onWindow = { identity, start, end ->
+                if (manga) io.legado.app.model.ReadManga.settleWindow(identity, start, end, db)
+                else io.legado.app.model.ReadBook.settleWindow(identity, start, end, db)
+            }
+        )
+
 }

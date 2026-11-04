@@ -32,6 +32,7 @@ import io.legado.app.data.entities.BookSource
 import io.legado.app.databinding.ActivityMangaBinding
 import io.legado.app.databinding.ViewLoadMoreBinding
 import io.legado.app.help.MangaPerfLog
+import io.legado.app.help.book.ReadingSessionTimer
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.isImage
 import io.legado.app.help.book.isLocal
@@ -75,6 +76,9 @@ import io.legado.app.utils.toggleSystemBar
 import io.legado.app.utils.viewbindingdelegate.viewBinding
 import io.legado.app.utils.visible
 import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.DecimalFormat
@@ -369,11 +373,18 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
         )
     }
 
+    private var readingTimeJob: Job? = null
+
     override fun onResume() {
         super.onResume()
-        // 与 ReadBookActivity.onResume 对齐:每次回到前台重锚计时起点,
-        // 避免后台/锁屏/切书期间的墙上时间在下一次翻页时被整段计入阅读时长
-        ReadManga.readStartTime = System.currentTimeMillis()
+        ReadManga.resumeReading()
+        readingTimeJob?.cancel()
+        readingTimeJob = lifecycleScope.launch {
+            while (isActive) {
+                delay(ReadingSessionTimer.CHECKPOINT_INTERVAL_MS)
+                ReadManga.upReadTime()
+            }
+        }
         networkChangedListener.register()
         networkChangedListener.onNetworkChanged = {
             // 当网络是可用状态且无需初始化时同步进度（初始化中已有同步进度逻辑）
@@ -390,6 +401,10 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
     }
 
     override fun onPause() {
+        // 捕获离开页面的时刻，先结算再进行原有进度保存/备份。
+        readingTimeJob?.cancel()
+        readingTimeJob = null
+        ReadManga.pauseReading()
         super.onPause()
         if (ReadManga.inBookshelf) {
             ReadManga.saveRead()

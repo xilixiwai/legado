@@ -38,6 +38,7 @@ import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.AppWebDav
 import io.legado.app.help.IntentData
 import io.legado.app.help.TTS
+import io.legado.app.help.book.ReadingSessionTimer
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ContentProcessor
 import io.legado.app.help.book.isAudio
@@ -133,6 +134,7 @@ import kotlinx.coroutines.Dispatchers.Main
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -330,10 +332,19 @@ class ReadBookActivity : BaseReadBookActivity(),
         }
     }
 
+    private var readingTimeJob: Job? = null
+
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onResume() {
         super.onResume()
-        ReadBook.readStartTime = System.currentTimeMillis()
+        ReadBook.resumeReading()
+        readingTimeJob?.cancel()
+        readingTimeJob = lifecycleScope.launch {
+            while (isActive) {
+                delay(ReadingSessionTimer.CHECKPOINT_INTERVAL_MS)
+                ReadBook.upReadTime()
+            }
+        }
         if (bookChanged) {
             bookChanged = false
             ReadBook.callBack = this
@@ -361,6 +372,10 @@ class ReadBookActivity : BaseReadBookActivity(),
     }
 
     override fun onPause() {
+        // 捕获离开页面的时刻，先结算再进行原有进度保存/备份。
+        readingTimeJob?.cancel()
+        readingTimeJob = null
+        ReadBook.pauseReading()
         super.onPause()
         autoPageStop()
         backupJob?.cancel()

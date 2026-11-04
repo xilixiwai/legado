@@ -7,6 +7,8 @@ import io.legado.app.data.entities.ReadRecord
 import io.legado.app.data.entities.ReadRecordDetail
 import io.legado.app.model.ReadBook
 import io.legado.app.model.ReadManga
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
@@ -36,6 +38,13 @@ import java.time.temporal.TemporalAdjusters
  * 传入独立内存库调用，此时无并发。
  */
 object ReadRecordDetailHelper {
+
+    /** 统计页只展示持久化值：等待此前的离页/切书结算，不把实时会话虚加到查询结果。 */
+    suspend fun awaitPendingWrites() = suspendCancellableCoroutine<Unit> { continuation ->
+        ReadBook.executor.execute {
+            if (continuation.isActive) continuation.resume(Unit)
+        }
+    }
 
     /** 拆天结果：本地日期键、该段真实起止时刻 */
     data class DateSegment(val date: String, val segmentStart: Long, val segmentEnd: Long)

@@ -11,6 +11,8 @@ import io.legado.app.help.AppWebDav
 import io.legado.app.help.ConcurrentRateLimiter
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ContentProcessor
+import io.legado.app.help.book.ReadingSessionTimer
+import io.legado.app.help.book.ReadingTimeIdentity
 import io.legado.app.help.book.ReadRecordDetailHelper
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.isSameNameAuthor
@@ -55,7 +57,14 @@ object ReadManga : CoroutineScope by MainScope() {
     var curMangaChapter: MangaChapter? = null
     var nextMangaChapter: MangaChapter? = null
     var bookSource: BookSource? = null
-    var readStartTime: Long = System.currentTimeMillis()
+    private val readingSession = ReadingSessionTimer<ReadingTimeIdentity>(
+        onIdentityChanged = { identity ->
+            loadReadRecord(identity)
+        },
+        onWindow = { identity, start, end ->
+            if (AppConfig.enableReadRecord) settleWindow(identity, start, end)
+        }
+    )
     private val readRecord = ReadRecord()
     private val loadingChapters = arrayListOf<Int>()
     var simulatedChapterSize = 0
@@ -70,11 +79,8 @@ object ReadManga : CoroutineScope by MainScope() {
     val hasNextChapter get() = durChapterIndex < simulatedChapterSize - 1
 
     fun resetData(book: Book) {
+        bindReadingIdentity(book)
         ReadManga.book = book
-        readRecord.bookName = book.name
-        // 只取本机分区（deviceId 为空串）作计时基数：其他设备分区的行是其他设备的书籍副本，
-        // 参与基数会造成每次结算后累计逐次膨胀
-        readRecord.readTime = appDb.readRecordDao.getOwnReadTime(book.name) ?: 0
         chapterSize = appDb.bookChapterDao.getChapterCount(book.bookUrl)
         simulatedChapterSize = if (book.readSimulating()) {
             book.simulatedTotalChapterNum()
@@ -93,6 +99,7 @@ object ReadManga : CoroutineScope by MainScope() {
     }
 
     fun upData(book: Book) {
+        bindReadingIdentity(book)
         ReadManga.book = book
         chapterSize = appDb.bookChapterDao.getChapterCount(book.bookUrl)
         simulatedChapterSize = if (book.readSimulating()) {
@@ -130,13 +137,42 @@ object ReadManga : CoroutineScope by MainScope() {
     }
 
     //每次切换章节更新阅读记录
-    fun upReadTime() {
-        executor.execute {
-            if (!AppConfig.enableReadRecord) {
-                return@execute
-            }
-            settleWindow()
-        }
+    /** 与窗口结算使用同一执行器；db 参数供真实 Room 测试注入。 */
+    internal fun loadReadRecord(
+        identity: ReadingTimeIdentity,
+        db: io.legado.app.data.AppDatabase = appDb
+    ) {
+        readRecord.bookName = identity.name
+        readRecord.readTime = db.readRecordDao.getOwnReadTime(identity.name) ?: 0L
+    }
+
+    /** 新页面/新 intent 指向另一书时，先关闭旧书窗口，加载空档不计给旧书。 */
+    fun prepareReading(bookUrl: String?) {
+        if (bookUrl == null || book?.bookUrl == bookUrl) return
+        val at = System.currentTimeMillis()
+        executor.execute { readingSession.unbind(at) }
+    }
+
+    /** 事件时刻在入队前捕获，排队延迟不能算作阅读时间。 */
+    fun upReadTime(includeBackground: Boolean = false) {
+        val at = System.currentTimeMillis()
+        executor.execute { readingSession.checkpoint(at, includeBackground) }
+    }
+
+    fun resumeReading() {
+        val at = System.currentTimeMillis()
+        executor.execute { readingSession.resume(at) }
+    }
+
+    fun pauseReading() {
+        val at = System.currentTimeMillis()
+        executor.execute { readingSession.pause(at) }
+    }
+
+    private fun bindReadingIdentity(book: Book) {
+        val identity = ReadingTimeIdentity(book.name, book.author, book.type)
+        val at = System.currentTimeMillis()
+        executor.execute { readingSession.bind(identity, at) }
     }
 
     /**
@@ -148,30 +184,29 @@ object ReadManga : CoroutineScope by MainScope() {
      * 书籍身份按当前 (name, author) 记账：匹配不到已有统计身份时自然创建新记录，
      * 旧身份记录原样保留，不做自动迁移或合并。
      */
-    private fun settleWindow() {
-        val windowStart = readStartTime
-        val now = System.currentTimeMillis()
+    internal fun settleWindow(
+        book: ReadingTimeIdentity,
+        windowStart: Long,
+        now: Long,
+        db: io.legado.app.data.AppDatabase = appDb
+    ) {
         // 时钟回拨保护：负窗口按 0 计入，避免累计被扣减
         val delta = (now - windowStart).coerceAtLeast(0L)
         val memBefore = readRecord.readTime
         readRecord.readTime = readRecord.readTime + delta
-        readStartTime = now
         readRecord.lastRead = now
-        val book = this.book
         runCatching {
-            appDb.runInTransaction {
-                appDb.readRecordDao.insert(readRecord)
-                if (book != null) {
-                    ReadRecordDetailHelper.appendWindow(
-                        book.name, book.author, book.type, windowStart, now
-                    )
-                }
+            db.runInTransaction {
+                db.readRecordDao.insert(readRecord)
+                ReadRecordDetailHelper.appendWindow(
+                    book.name, book.author, book.type, windowStart, now, db
+                )
             }
         }.onSuccess {
-            ReadRecordDetailHelper.retryPendingWork()
+            ReadRecordDetailHelper.retryPendingWork(db)
         }.onFailure {
             AppLog.put("阅读统计写入失败:${it.localizedMessage}", it)
-            if (book != null && delta > 0) {
+            if (delta > 0) {
                 // 事务未提交：撤销本次内存推进，窗口改由待冲正队列唯一持有，
                 // 防止下次成功结算的 REPLACE 已携带该窗口、冲正再补差造成双重入账
                 rollbackUncommittedWindow(book.name, memBefore, delta)
@@ -189,8 +224,8 @@ object ReadManga : CoroutineScope by MainScope() {
      * 必须在 globalExecutor 线程调用；internal 供 androidTest 直接验证撤销规则。
      */
     internal fun rollbackUncommittedWindow(bookName: String, memBefore: Long, delta: Long) {
-        val current = book ?: return
-        if (current.name == bookName && readRecord.readTime == memBefore + delta) {
+        val currentName = readingSession.identity?.name ?: book?.name ?: return
+        if (currentName == bookName && readRecord.readTime == memBefore + delta) {
             readRecord.readTime = memBefore
         }
     }
@@ -201,8 +236,8 @@ object ReadManga : CoroutineScope by MainScope() {
      * 必须在 globalExecutor 线程调用（retryPendingWork）。返回是否补入。
      */
     fun addReconciledReadTime(bookName: String, delta: Long): Boolean {
-        val current = book ?: return false
-        if (current.name != bookName) return false
+        val currentName = readingSession.identity?.name ?: book?.name ?: return false
+        if (currentName != bookName) return false
         readRecord.readTime += delta
         return true
     }
@@ -218,7 +253,7 @@ object ReadManga : CoroutineScope by MainScope() {
     fun resetReadRecordCache() {
         readRecord.readTime = 0
         readRecord.lastRead = System.currentTimeMillis()
-        readStartTime = System.currentTimeMillis()
+        readingSession.reanchor(System.currentTimeMillis())
     }
 
     @Synchronized

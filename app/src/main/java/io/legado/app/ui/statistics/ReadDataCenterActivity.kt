@@ -13,13 +13,12 @@ import io.legado.app.databinding.ActivityReadDataCenterBinding
 import io.legado.app.help.book.ReadRecordDetailHelper
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.theme.primaryTextColor
-import io.legado.app.utils.applyNavigationBarPadding
 import io.legado.app.utils.applyTint
 import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
 
 /**
- * 阅读数据中心：总览 / 日历 / 排行 / 记录 四 Tab。
+ * 阅读数据中心：总览 / 日历 / 排行。搜索、排序集中在排行页。
  * 清空入口统一在右上菜单「清空全部阅读统计」（二次确认 + 明确范围提示），
  * 与计时写入共用同一执行器，保证清空与在途结算串行、清空后旧窗口不复活。
  */
@@ -37,11 +36,12 @@ class ReadDataCenterActivity : BaseActivity<ActivityReadDataCenterBinding>() {
         binding.viewPager.addOnPageChangeListener(object :
             androidx.viewpager.widget.ViewPager.SimpleOnPageChangeListener() {
             override fun onPageSelected(position: Int) {
-                upSearchViewVisible(position == 3)
+                upSearchViewVisible(position == 2)
+                invalidateOptionsMenu()
             }
         })
         initSearchView()
-        upSearchViewVisible(false)
+        upSearchViewVisible(binding.viewPager.currentItem == 2)
     }
 
     private fun upSearchViewVisible(visible: Boolean) {
@@ -59,26 +59,25 @@ class ReadDataCenterActivity : BaseActivity<ActivityReadDataCenterBinding>() {
             }
 
             override fun onQueryTextChange(newText: String?): Boolean {
-                recordFragment()?.setSearchKey(newText)
+                rankFragment()?.setSearchKey(newText)
                 return false
             }
         })
     }
 
-    private fun recordFragment(): ReadDataRecordFragment? {
-        return supportFragmentManager.findFragmentByTag(makeFragmentName(3)) as? ReadDataRecordFragment
+    private fun rankFragment(): ReadDataRankFragment? {
+        return supportFragmentManager.findFragmentByTag(makeFragmentName(2)) as? ReadDataRankFragment
     }
 
     private fun makeFragmentName(position: Int): String {
         return "android:switcher:${binding.viewPager.id}:$position"
     }
 
-    private fun refreshAll() {
+    fun refreshAll() {
         supportFragmentManager.fragments.forEach { fragment ->
             (fragment as? ReadDataOverviewFragment)?.reload()
             (fragment as? ReadDataCalendarFragment)?.reload()
             (fragment as? ReadDataRankFragment)?.reload()
-            (fragment as? ReadDataRecordFragment)?.reload()
         }
     }
 
@@ -87,35 +86,37 @@ class ReadDataCenterActivity : BaseActivity<ActivityReadDataCenterBinding>() {
         return super.onCompatCreateOptionsMenu(menu)
     }
 
-    override fun onMenuOpened(featureId: Int, menu: Menu): Boolean {
-        recordFragment()?.let { record ->
-            when (record.sortModeMenuChecked()) {
+    override fun onPrepareOptionsMenu(menu: Menu): Boolean {
+        menu.findItem(R.id.menu_sort)?.isVisible = binding.viewPager.currentItem == 2
+        rankFragment()?.let { rank ->
+            when (rank.sortModeMenuChecked()) {
                 1 -> menu.findItem(R.id.menu_sort_read_long)?.isChecked = true
                 2 -> menu.findItem(R.id.menu_sort_read_time)?.isChecked = true
                 else -> menu.findItem(R.id.menu_sort_name)?.isChecked = true
             }
         }
-        return super.onMenuOpened(featureId, menu)
+        return super.onPrepareOptionsMenu(menu)
     }
 
     override fun onCompatOptionsItemSelected(item: MenuItem): Boolean {
         when (item.itemId) {
             R.id.menu_sort_name -> {
-                recordFragment()?.onSortSelected(0)
+                rankFragment()?.onSortSelected(0)
                 item.isChecked = true
             }
 
             R.id.menu_sort_read_long -> {
-                recordFragment()?.onSortSelected(1)
+                rankFragment()?.onSortSelected(1)
                 item.isChecked = true
             }
 
             R.id.menu_sort_read_time -> {
-                recordFragment()?.onSortSelected(2)
+                rankFragment()?.onSortSelected(2)
                 item.isChecked = true
             }
 
             R.id.menu_clear_all_statistics -> sureClearAlert()
+            R.id.menu_refresh -> refreshAll()
         }
         return super.onCompatOptionsItemSelected(item)
     }
@@ -144,16 +145,14 @@ class ReadDataCenterActivity : BaseActivity<ActivityReadDataCenterBinding>() {
         override fun getItem(position: Int): Fragment = when (position) {
             1 -> ReadDataCalendarFragment()
             2 -> ReadDataRankFragment()
-            3 -> ReadDataRecordFragment()
             else -> ReadDataOverviewFragment()
         }
 
-        override fun getCount(): Int = 4
+        override fun getCount(): Int = 3
 
         override fun getPageTitle(position: Int): CharSequence = when (position) {
             1 -> getString(R.string.read_data_tab_calendar)
             2 -> getString(R.string.read_data_tab_rank)
-            3 -> getString(R.string.read_data_tab_record)
             else -> getString(R.string.read_data_tab_overview)
         }
     }

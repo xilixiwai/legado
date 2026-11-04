@@ -25,26 +25,19 @@ interface ReadRecordDetailDao {
     )
     fun get(deviceId: String, bookName: String, bookAuthor: String, date: String): ReadRecordDetail?
 
-    @get:Query("select sum(readTime) from readRecordDetail")
+    @get:Query(ReadStatisticsSql.TOTAL_SUM)
     val totalSum: Long?
 
-    @Query("select count(distinct date) from readRecordDetail")
+    @Query(ReadStatisticsSql.DISTINCT_DATE_COUNT)
     fun distinctDateCount(): Int
 
     @Query("select * from readRecordDetail where date >= :start and date < :end")
     fun getByDateRange(start: String, end: String): List<ReadRecordDetail>
 
-    @Query("select sum(readTime) from readRecordDetail where date >= :start and date < :end")
+    @Query(ReadStatisticsSql.SUM_RANGE)
     fun sumRange(start: String, end: String): Long?
 
-    @Query(
-        """select bookName, bookAuthor, max(bookType) as bookType, sum(readTime) as readTime,
-            max(lastReadTime) as lastReadTime
-            from readRecordDetail
-            where date >= :start and date < :end
-            group by bookName, bookAuthor
-            order by readTime desc"""
-    )
+    @Query(ReadStatisticsSql.RANK_RANGE)
     fun rankRange(start: String, end: String): List<DetailBookRankShow>
 
     @Query("select min(date) from readRecordDetail")

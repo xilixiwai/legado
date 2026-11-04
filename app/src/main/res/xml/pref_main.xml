@@ -97,17 +97,10 @@
             app:iconSpaceReserved="false" />
 
         <io.legado.app.lib.prefs.Preference
-            android:icon="@drawable/ic_history"
-            android:key="readRecord"
-            android:summary="@string/read_record_summary"
-            android:title="@string/read_record"
-            app:iconSpaceReserved="false" />
-
-        <io.legado.app.lib.prefs.Preference
             android:icon="@drawable/ic_bubble_chart"
-            android:key="readingStatistics"
-            android:summary="@string/reading_statistics_summary"
-            android:title="@string/reading_statistics"
+            android:key="readDataCenter"
+            android:summary="@string/read_data_center_summary"
+            android:title="@string/read_data_center"
             app:iconSpaceReserved="false" />
 
         <io.legado.app.lib.prefs.Preference
