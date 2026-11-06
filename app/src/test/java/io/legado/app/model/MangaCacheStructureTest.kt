@@ -63,18 +63,18 @@ class MangaCacheStructureTest {
     @Test
     fun `漫画章节缓存在CacheBook里改走统一入口且与小说分支分开`() {
         val src = DiagSourceText.source(cacheBookPath)
-        val firstBranch = DiagSourceText.block(
-            src, "if (BookHelp.hasContent(book, chapter)) {", "WebBook.getContent("
-        )
-        assertTrue(firstBranch, firstBranch.contains("if (book.isImage)"))
-        DiagSourceText.assertOrder(
-            firstBranch,
-            "BookHelp.ensureChapterImages(",
-            "BookHelp.saveImages("
-        )
-        //首次缓存正文成功后也要落图，否则「缓存了这一章」只有正文
-        val webBookBranch = DiagSourceText.block(src, "WebBook.getContent(", "downloadFinish(chapter, content)")
-        assertTrue(webBookBranch, webBookBranch.contains("BookHelp.ensureChapterImages("))
+        // Both text branches now share the production CacheBookRun batch path.
+        assertTrue(src, src.contains("run.schedule(scope, context)"))
+        assertTrue(src, src.contains("override val isManga = taskBook.isImage"))
+        assertTrue(src, src.contains("BookHelp.ensureChapterImages(source, taskBook, chapter, content, 1)"))
+        assertTrue(src, src.contains("BookHelp.saveImages(source, taskBook, chapter, content, 1)"))
+        val runner = DiagSourceText.source("app/src/main/java/io/legado/app/model/CacheBookRun.kt")
+        DiagSourceText.assertOrder(runner,
+            "content = if (existing) work.readContent() else work.fetchContent()",
+            "if (work.isManga)", "work.ensureImages(content)", "work.saveTextImages(content)")
+        assertTrue(runner, runner.contains("batch.hit + batch.stored == batch.total"))
+        // Runtime assertions for these two branches live in CacheBookRunTest.
+
     }
 
     @Test

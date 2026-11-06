@@ -19,6 +19,12 @@ import io.legado.app.ui.book.cache.CacheActivity
 import io.legado.app.utils.activityPendingIntent
 import io.legado.app.utils.postEvent
 import io.legado.app.utils.servicePendingIntent
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.delay
@@ -45,6 +51,8 @@ class CacheBookService : BaseService() {
     private var cachePool =
         Executors.newFixedThreadPool(min(threadCount, AppConst.MAX_THREAD)).asCoroutineDispatcher()
     private var downloadJob: Job? = null
+    private var accepting = true
+    private var latestStartId = 0
     private var notificationContent = appCtx.getString(R.string.service_starting)
     private var mutex = Mutex()
     private val notificationBuilder by lazy {
@@ -71,21 +79,30 @@ class CacheBookService : BaseService() {
                 notificationContent = CacheBook.downloadSummary
                 upCacheBookNotification()
                 postEvent(EventBus.UP_DOWNLOAD, "")
+                if (accepting && downloadJob == null) download()
             }
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        latestStartId = startId
         intent?.action?.let { action ->
             when (action) {
-                IntentAction.start -> addDownloadData(
-                    intent.getStringExtra("bookUrl"),
-                    intent.getIntExtra("start", 0),
-                    intent.getIntExtra("end", 0)
-                )
+                IntentAction.start -> {
+                    accepting = true
+                    addDownloadData(
+                        intent.getStringExtra("bookUrl"),
+                        intent.getIntExtra("start", 0),
+                        intent.getIntExtra("end", 0)
+                    )
+                    download()
+                }
 
                 IntentAction.remove -> removeDownload(intent.getStringExtra("bookUrl"))
-                IntentAction.stop -> stopSelf()
+                IntentAction.stop -> {
+                    stopDownloads()
+                    stopSelfResult(startId)
+                }
             }
         }
         return super.onStartCommand(intent, flags, startId)
@@ -93,80 +110,109 @@ class CacheBookService : BaseService() {
 
     override fun onDestroy() {
         isRun = false
+        stopDownloads()
         cachePool.close()
-        CacheBook.close()
         super.onDestroy()
         postEvent(EventBus.UP_DOWNLOAD, "")
     }
 
+    private fun stopDownloads() {
+        accepting = false
+        // Invalidate preparation and chapter identities synchronously, before cancel callbacks.
+        CacheBook.close()
+        downloadJob?.cancel()
+        downloadJob = null
+    }
+
     private fun addDownloadData(bookUrl: String?, start: Int, end: Int) {
         bookUrl ?: return
-        execute {
-            val cacheBook = CacheBook.getOrCreate(bookUrl) ?: return@execute
-            val chapterCount = appDb.bookChapterDao.getChapterCount(bookUrl)
-            val book = cacheBook.book
-            if (chapterCount == 0) {
-                cacheBook.setLoading()
-                mutex.withLock {
-                    val name = book.name
-                    if (book.tocUrl.isEmpty()) {
-                        kotlin.runCatching {
-                            WebBook.getBookInfoAwait(cacheBook.bookSource, book)
-                        }.onFailure {
-                            removeDownload(bookUrl)
-                            val msg = "《$name》目录为空且加载详情页失败\n${it.localizedMessage}"
-                            AppLog.put(msg, it, true)
-                            return@execute
+        CacheBook.preparations.launch(bookUrl, lifecycleScope, IO) { ticket ->
+            try {
+                val cacheBook = CacheBook.preparations.withCurrent(ticket) {
+                    CacheBook.getOrCreate(bookUrl)
+                } ?: return@launch
+                val job = CacheBook.preparations.withCurrent(ticket) {
+                    cacheBook.prepare(lifecycleScope, IO, start, end, load = { token ->
+                        // Parsing mutates Book, so an obsolete preparation must not share the live copy.
+                        val book = cacheBook.withPreparation(token) {
+                            cacheBook.book.let { original ->
+                                original.copy().apply {
+                                    infoHtml = original.infoHtml
+                                    tocHtml = original.tocHtml
+                                }
+                            }
                         }
-                    }
-                    WebBook.getChapterListAwait(cacheBook.bookSource, book).onFailure {
-                        if (book.totalChapterNum > 0) {
-                            book.totalChapterNum = 0
-                            book.update()
+                        val source = cacheBook.withPreparation(token) { cacheBook.bookSource }
+                        val chapterCount = appDb.bookChapterDao.getChapterCount(bookUrl)
+                        if (chapterCount == 0) {
+                            mutex.withLock {
+                                cacheBook.withPreparation(token) { Unit }
+                                if (book.tocUrl.isEmpty()) {
+                                    WebBook.getBookInfoAwait(source, book)
+                                    currentCoroutineContext().ensureActive()
+                                    cacheBook.withPreparation(token) { Unit }
+                                }
+                                val result = WebBook.getChapterListAwait(source, book)
+                                currentCoroutineContext().ensureActive()
+                                result.exceptionOrNull()?.let { error ->
+                                    if (error is CancellationException) throw error
+                                    cacheBook.withPreparation(token) {
+                                        if (book.totalChapterNum > 0) {
+                                            book.totalChapterNum = 0
+                                            book.update()
+                                        }
+                                    }
+                                    throw error
+                                }
+                                val toc = result.getOrThrow()
+                                cacheBook.withPreparation(token) {
+                                    appDb.bookChapterDao.insert(*toc.toTypedArray())
+                                    book.update()
+                                    cacheBook.book = book
+                                }
+                            }
                         }
-                        removeDownload(bookUrl)
-                        val msg = "《$name》目录为空且加载目录失败\n${it.localizedMessage}"
-                        AppLog.put(msg, it, true)
-                        return@execute
-                    }.getOrNull()?.let { toc ->
-                        appDb.bookChapterDao.insert(*toc.toTypedArray())
-                    }
-                    book.update()
+                        book.lastChapterIndex
+                    }, failed = { error ->
+                        AppLog.put("《${cacheBook.book.name}》缓存准备失败\n${error.localizedMessage}", error, true)
+                    })
                 }
-            }
-            val end2 = if (end < 0) {
-                book.lastChapterIndex
-            } else {
-                min(end, book.lastChapterIndex)
-            }
-            cacheBook.addDownload(start, end2)
-            notificationContent = CacheBook.downloadSummary
-            upCacheBookNotification()
-        }.onFinally {
-            if (downloadJob == null) {
-                download()
+                job.join()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                CacheBook.preparations.withCurrent(ticket) {
+                    AppLog.put("缓存准备失败\n${e.localizedMessage}", e, true)
+                }
             }
         }
     }
 
     private fun removeDownload(bookUrl: String?) {
+        bookUrl ?: return
+        CacheBook.preparations.stop(bookUrl)
         CacheBook.cacheBookMap[bookUrl]?.stop()
         postEvent(EventBus.UP_DOWNLOAD, "")
-        if (downloadJob == null && CacheBook.isRun) {
-            download()
-            return
-        }
-        if (CacheBook.cacheBookMap.isEmpty()) {
-            stopSelf()
-        }
+        if (accepting) download()
     }
 
     private fun download() {
-        downloadJob?.cancel()
-        downloadJob = lifecycleScope.launch(cachePool) {
-            CacheBook.startProcessJob(cachePool)
-            stopSelf()
+        if (!accepting || downloadJob != null) return
+        // Main dispatcher serializes start commands and the worker's final stop decision.
+        val job = lifecycleScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                withContext(cachePool) { CacheBook.startProcessJob(cachePool) }
+            } finally {
+                if (downloadJob === currentCoroutineContext()[Job]) {
+                    downloadJob = null
+                    if (accepting) {
+                        if (CacheBook.isRun) download() else stopSelfResult(latestStartId)
+                    }
+                }
+            }
         }
+        downloadJob = job
+        job.start()
     }
 
     private fun upCacheBookNotification() {
