@@ -26,6 +26,7 @@ import io.legado.app.databinding.ItemBookMangaPageBinding
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.getBookSource
 import io.legado.app.model.ReadManga
+import io.legado.app.ui.book.manga.MangaImageLink
 import io.legado.app.ui.book.manga.MangaPageDiagnostics
 import io.legado.app.ui.book.manga.MangaPageIdentity
 import io.legado.app.ui.book.manga.MangaResponseFormatter
@@ -34,6 +35,7 @@ import io.legado.app.ui.book.manga.entities.EpaperTransformation
 import io.legado.app.ui.book.manga.entities.GrayscaleTransformation
 import io.legado.app.ui.book.manga.entities.MangaPage
 import io.legado.app.ui.book.manga.entities.ReaderLoading
+import io.legado.app.ui.book.manga.resolveMangaImageLink
 import io.legado.app.utils.dpToPx
 
 
@@ -105,6 +107,16 @@ class MangaAdapter(private val context: Context, private val diagnostics: MangaP
 
         private var boundPage: MangaPage? = null
         private var boundIdentity: MangaPageIdentity? = null
+
+        fun imageLink(): MangaImageLink? = resolveMangaImageLink(
+            page = getItem(bindingAdapterPosition) as? MangaPage,
+            boundIdentity = boundIdentity,
+            book = ReadManga.book,
+            source = ReadManga.bookSource,
+            chapters = listOfNotNull(
+                ReadManga.prevMangaChapter, ReadManga.curMangaChapter, ReadManga.nextMangaChapter
+            ),
+        )
 
         init {
             initComponent(

@@ -685,6 +685,18 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
         return super.onCompatOptionsItemSelected(item)
     }
 
+    override fun currentImageLink(): MangaImageLink? {
+        val recycler = binding.recyclerView
+        if (isDestroyed || isFinishing || loadingViewVisible || recycler.isLayoutRequested ||
+            recycler.hasPendingAdapterUpdates()) return null
+        val center = recycler.findChildViewUnder(recycler.width / 2f, recycler.height / 2f)
+            ?: return null
+        val holder = recycler.getChildViewHolder(center) as? MangaAdapter.PageViewHolder
+            ?: return null
+        if (holder.bindingAdapter !== mAdapter) return null
+        return holder.imageLink()
+    }
+
     override fun openBookInfoActivity() {
         ReadManga.book?.let {
             bookInfoActivity.launch {

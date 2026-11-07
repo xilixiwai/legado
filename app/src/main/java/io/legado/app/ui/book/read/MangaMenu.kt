@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.drawable.GradientDrawable
 import android.util.AttributeSet
 import android.view.LayoutInflater
+import android.view.ViewTreeObserver
 import android.view.animation.Animation
 import android.widget.FrameLayout
 import android.widget.SeekBar
@@ -13,11 +14,9 @@ import androidx.core.view.isVisible
 import io.legado.app.R
 import io.legado.app.databinding.ViewMangaMenuBinding
 import io.legado.app.help.config.AppConfig
-import io.legado.app.help.source.getSourceType
-import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.theme.bottomBackground
-import io.legado.app.model.ReadBook
 import io.legado.app.model.ReadManga
+import io.legado.app.ui.book.manga.MangaImageLink
 import io.legado.app.ui.browser.WebViewActivity
 import io.legado.app.ui.widget.seekbar.SeekBarChangeListener
 import io.legado.app.utils.ColorUtils
@@ -29,7 +28,6 @@ import io.legado.app.utils.gone
 import io.legado.app.utils.invisible
 import io.legado.app.utils.loadAnimation
 import io.legado.app.utils.modifyBegin
-import io.legado.app.utils.openUrl
 import io.legado.app.utils.startActivity
 import io.legado.app.utils.visible
 
@@ -54,6 +52,13 @@ class MangaMenu @JvmOverloads constructor(
     }
     private var isMenuOutAnimating = false
     private var bgColor = context.bottomBackground
+    private var imageLink: MangaImageLink? = null
+    private val imageLinkDrawListener = ViewTreeObserver.OnPreDrawListener {
+        // 每次绘制读取实际中心 View，覆盖滚动、跳页、重新布局和同位置列表替换。
+        // 只观察绘制，不接管触摸；不保存异步回调中的旧页码或旧 URL。
+        if (isVisible) refreshImageLink()
+        true
+    }
 
     private val menuOutListener = object : Animation.AnimationListener {
         override fun onAnimationStart(animation: Animation) {
@@ -63,6 +68,7 @@ class MangaMenu @JvmOverloads constructor(
 
         override fun onAnimationEnd(animation: Animation) {
             this@MangaMenu.invisible()
+            showImageLink(null)
             binding.titleBar.invisible()
             binding.bottomMenu.invisible()
             isMenuOutAnimating = false
@@ -93,6 +99,33 @@ class MangaMenu @JvmOverloads constructor(
     init {
         initView()
         bindEvent()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        viewTreeObserver.addOnPreDrawListener(imageLinkDrawListener)
+    }
+
+    override fun onDetachedFromWindow() {
+        if (viewTreeObserver.isAlive) {
+            viewTreeObserver.removeOnPreDrawListener(imageLinkDrawListener)
+        }
+        showImageLink(null)
+        super.onDetachedFromWindow()
+    }
+
+    private fun refreshImageLink(): MangaImageLink? = callBack.currentImageLink().also(::showImageLink)
+
+    private fun showImageLink(link: MangaImageLink?) {
+        if (imageLink == link) return
+        imageLink = link
+        binding.run {
+            tvChapterName.text = link?.title.orEmpty()
+            tvChapterName.isVisible = link != null
+            tvChapterUrl.text = link?.url.orEmpty()
+            tvChapterUrl.isVisible = link != null
+            titleBarAddition.isVisible = link != null || AppConfig.showReadTitleBarAddition
+        }
     }
 
     private fun initView() = binding.run {
@@ -153,6 +186,7 @@ class MangaMenu @JvmOverloads constructor(
     }
 
     fun runMenuIn(anim: Boolean = !AppConfig.isEInkMode) {
+        refreshImageLink()
         this.visible()
         binding.titleBar.visible()
         binding.bottomMenu.visible()
@@ -172,36 +206,18 @@ class MangaMenu @JvmOverloads constructor(
             callBack.openBookInfoActivity()
         }
         val chapterViewClickListener = OnClickListener {
-            if (AppConfig.readUrlInBrowser) {
-                context.openUrl(tvChapterUrl.text.toString().substringBefore(",{"))
-            } else {
-                context.startActivity<WebViewActivity> {
-                    val url = tvChapterUrl.text.toString()
-                    val bookSource = ReadBook.bookSource
-                    putExtra("title", tvChapterName.text)
-                    putExtra("url", url)
-                    putExtra("sourceOrigin", bookSource?.bookSourceUrl)
-                    putExtra("sourceName", bookSource?.bookSourceName)
-                    putExtra("sourceType", bookSource?.getSourceType())
-                }
+            // 点击时重新校验，禁止打开刚被换书/换源/列表替换淘汰的页面。
+            val link = refreshImageLink() ?: return@OnClickListener
+            context.startActivity<WebViewActivity> {
+                putExtra("title", link.title)
+                putExtra("url", link.url)
+                putExtra("sourceOrigin", link.sourceOrigin)
+                putExtra("sourceName", link.sourceName)
+                putExtra("sourceType", link.sourceType)
             }
-        }
-        val chapterViewLongClickListener = OnLongClickListener {
-            context.alert(R.string.open_fun) {
-                setMessage(R.string.use_browser_open)
-                okButton {
-                    AppConfig.readUrlInBrowser = true
-                }
-                noButton {
-                    AppConfig.readUrlInBrowser = false
-                }
-            }
-            true
         }
         tvChapterName.setOnClickListener(chapterViewClickListener)
-        tvChapterName.setOnLongClickListener(chapterViewLongClickListener)
         tvChapterUrl.setOnClickListener(chapterViewClickListener)
-        tvChapterUrl.setOnLongClickListener(chapterViewLongClickListener)
 
         tvNext.setOnClickListener {
             ReadManga.moveToNextChapter(true)
@@ -235,6 +251,7 @@ class MangaMenu @JvmOverloads constructor(
     }
 
     interface CallBack {
+        fun currentImageLink(): MangaImageLink?
         fun openBookInfoActivity()
         fun upSystemUiVisibility(menuIsVisible: Boolean)
         fun skipToPage(index: Int)
