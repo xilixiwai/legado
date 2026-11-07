@@ -28,13 +28,6 @@
         android:visibility="gone"
         tools:visibility="visible" />
 
-    <io.legado.app.ui.book.read.MangaMenu
-        android:id="@+id/manga_menu"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:visibility="gone"
-        tools:visibility="visible" />
-
     <FrameLayout
         android:id="@+id/fl_loading"
         android:layout_width="match_parent"
@@ -94,5 +87,13 @@
         </LinearLayout>
 
     </FrameLayout>
+
+    <!-- 工具栏及菜单位于章节加载/失败层上方，加载中也能正常操作。 -->
+    <io.legado.app.ui.book.read.MangaMenu
+        android:id="@+id/manga_menu"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone"
+        tools:visibility="visible" />
 
 </FrameLayout>
