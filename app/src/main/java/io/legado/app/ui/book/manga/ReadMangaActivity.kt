@@ -168,12 +168,6 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
         ReadManga.register(this)
         upSystemUiVisibility(false)
         initRecyclerView()
-        // 章节加载/失败时仍可从空白区域唤出菜单，重试按钮保留自己的点击处理。
-        binding.flLoading.setOnClickListener {
-            if (!binding.mangaMenu.isVisible) {
-                binding.mangaMenu.runMenuIn()
-            }
-        }
         binding.tvRetry.setOnClickListener {
             binding.llLoading.isVisible = true
             binding.llRetry.isGone = true
@@ -244,7 +238,8 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
         }
         binding.webtoonFrame.run {
             onTouchMiddle {
-                if (!binding.mangaMenu.isVisible && !loadingViewVisible) {
+                // 加载/失败时也复用列表确认的中心单击，空白区域滑动继续交给列表处理。
+                if (!binding.mangaMenu.isVisible) {
                     binding.mangaMenu.runMenuIn()
                 }
             }
