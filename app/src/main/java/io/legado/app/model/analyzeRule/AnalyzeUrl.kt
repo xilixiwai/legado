@@ -29,6 +29,8 @@ import io.legado.app.help.http.BackstageWebView
 import io.legado.app.help.http.CookieManager
 import io.legado.app.help.http.CookieManager.mergeCookies
 import io.legado.app.help.http.CookieStore
+import io.legado.app.help.http.ImageRequestObserver
+import io.legado.app.help.http.readObservedImageBytes
 import io.legado.app.help.http.RequestMethod
 import io.legado.app.help.http.StrResponse
 import io.legado.app.help.http.addHeaders
@@ -497,7 +499,9 @@ class AnalyzeUrl(
     /**
      * 访问网站,返回Response
      */
-    suspend fun getResponseAwait(): Response {
+    suspend fun getResponseAwait(): Response = getObservedResponseAwait(null)
+
+    private suspend fun getObservedResponseAwait(observer: ImageRequestObserver?): Response {
         concurrentRateLimiter.withLimit {
             setCookie()
             val response = getClient().newCallResponse(retry) {
@@ -519,6 +523,7 @@ class AnalyzeUrl(
 
                     else -> get(urlNoQuery, encodedQuery)
                 }
+                observer?.request(build().url.toString())
             }
             return response
         }
@@ -563,11 +568,14 @@ class AnalyzeUrl(
     /**
      * 访问网站,返回ByteArray
      */
-    suspend fun getByteArrayAwait(): ByteArray {
+    suspend fun getByteArrayAwait(): ByteArray = getByteArrayAwait(null)
+
+    suspend fun getByteArrayAwait(observer: ImageRequestObserver?): ByteArray {
         getByteArrayIfDataUri()?.let {
+            observer?.dataUri(it.size)
             return it
         }
-        return getResponseAwait().body.bytes()
+        return readObservedImageBytes(observer) { getObservedResponseAwait(observer) }
     }
 
     fun getByteArray(): ByteArray {

@@ -187,7 +187,7 @@ class MangaCacheStructureTest {
         assertFalse("失败路径不能删除旧候选", ensureBlock.contains("store.delete(key)"))
         val bookHelp = DiagSourceText.source(bookHelpPath)
         val fetchBlock = DiagSourceText.block(bookHelp, "private fun imageCache(", "locks = imageLocks")
-        DiagSourceText.assertOrder(fetchBlock, "getByteArrayAwait()", "if (book.isImage)", "ImageUtils.decode(src, bytes, isCover = false, bookSource, book)")
+        DiagSourceText.assertOrder(fetchBlock, "getByteArrayAwait(observer)", "if (book.isImage)", "ImageUtils.decode(src, bytes, isCover = false, bookSource, book)")
     }
 
     @Test
@@ -274,7 +274,7 @@ class MangaCacheStructureTest {
             "if (onHitFile != null)",
             "getValidatedImageFile(book, src)?.let",
             "return ImageCacheResult.HIT",
-            "imageCache(bookSource, book, chapter, trace).ensure(src, onImageData)"
+            "imageCache(bookSource, book, chapter, trace, observer).ensure(src, onImageData)"
         )
         //单次解析：候选与旧命名兜底在同一次遍历里完成校验（损坏候选不阻断有效候选）
         val resolverBlock = DiagSourceText.block(

@@ -26,6 +26,9 @@ import io.legado.app.databinding.ItemBookMangaPageBinding
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.getBookSource
 import io.legado.app.model.ReadManga
+import io.legado.app.ui.book.manga.MangaPageDiagnostics
+import io.legado.app.ui.book.manga.MangaPageIdentity
+import io.legado.app.ui.book.manga.MangaResponseFormatter
 import io.legado.app.ui.book.manga.config.MangaColorFilterConfig
 import io.legado.app.ui.book.manga.entities.EpaperTransformation
 import io.legado.app.ui.book.manga.entities.GrayscaleTransformation
@@ -34,7 +37,7 @@ import io.legado.app.ui.book.manga.entities.ReaderLoading
 import io.legado.app.utils.dpToPx
 
 
-class MangaAdapter(private val context: Context) :
+class MangaAdapter(private val context: Context, private val diagnostics: MangaPageDiagnostics) :
     RecyclerView.Adapter<RecyclerView.ViewHolder>(), PreloadModelProvider<Any> {
 
     private val inflater: LayoutInflater = LayoutInflater.from(context)
@@ -68,6 +71,21 @@ class MangaAdapter(private val context: Context) :
     }
 
     private val mDiffer = AsyncListDiffer(this, mDiffCallback)
+    private fun diagnosticIdentity(page: MangaPage): MangaPageIdentity? {
+        val book = ReadManga.book ?: return null
+        // 按实际页面对象查所属章节，不能用中心章节或可变的 adapter 位置替代。
+        // 异步差分还显示旧书/旧章节列表时，不给它套上新书身份。
+        val chapter = listOfNotNull(ReadManga.prevMangaChapter, ReadManga.curMangaChapter, ReadManga.nextMangaChapter)
+            .firstOrNull { ch -> ch.chapter.bookUrl == book.bookUrl && ch.pages.any { it === page } }
+            ?.chapter ?: return null
+        return MangaPageIdentity.create(book.bookUrl, book.origin,
+            "${chapter.index}:${chapter.url}", page.index, page.mImageUrl)
+    }
+
+    fun responseText(position: Int): String {
+        val page = getItem(position) as? MangaPage
+        return MangaResponseFormatter.format(diagnostics.snapshot(page?.let(::diagnosticIdentity)))
+    }
 
     fun getItem(@IntRange(from = 0) position: Int) = mDiffer.currentList.getOrNull(position)
 
@@ -85,6 +103,9 @@ class MangaAdapter(private val context: Context) :
     inner class PageViewHolder(binding: ItemBookMangaPageBinding) :
         MangaVH<ItemBookMangaPageBinding>(binding, context) {
 
+        private var boundPage: MangaPage? = null
+        private var boundIdentity: MangaPageIdentity? = null
+
         init {
             initComponent(
                 binding.loading,
@@ -94,20 +115,23 @@ class MangaAdapter(private val context: Context) :
                 binding.flProgress
             )
             binding.retry.setOnClickListener {
-                val item = mDiffer.currentList[layoutPosition]
-                if (item is MangaPage) {
-                    val isLastImage = item.imageCount > 0 && item.index == item.imageCount - 1
-                    loadImageWithRetry(
-                        item.mImageUrl, isHorizontal, isLastImage, mTransformation
-                    )
-                }
+                val item = boundPage ?: return@setOnClickListener
+                val current = getItem(bindingAdapterPosition) as? MangaPage ?: return@setOnClickListener
+                if (current == item && diagnosticIdentity(current) == boundIdentity) loadPage(current)
             }
         }
 
         fun onBind(item: MangaPage) {
+            boundPage = item
+            boundIdentity = diagnosticIdentity(item)
             setImageColorFilter()
+            loadPage(item)
+        }
+
+        private fun loadPage(item: MangaPage) {
             val isLastImage = item.imageCount > 0 && item.index == item.imageCount - 1
-            loadImageWithRetry(item.mImageUrl, isHorizontal, isLastImage, mTransformation)
+            val observer = diagnosticIdentity(item)?.let { diagnostics.begin(it, item.mImageUrl) }
+            loadImageWithRetry(item.mImageUrl, isHorizontal, isLastImage, mTransformation, observer)
         }
 
         fun setImageColorFilter() {

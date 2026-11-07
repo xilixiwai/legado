@@ -32,6 +32,7 @@ import io.legado.app.help.book.getBookSource
 import io.legado.app.help.book.isImage
 import io.legado.app.help.glide.ImageLoader
 import io.legado.app.help.glide.progress.ProgressManager
+import io.legado.app.help.http.ImageRequestObserver
 import io.legado.app.model.BookCover
 import io.legado.app.model.ImageCacheResult
 import io.legado.app.model.ReadManga
@@ -83,6 +84,7 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
 
     /** 递增序号，丢弃过期回调（同一个 VH 会被反复复用） */
     private var loadSequence = 0
+    private var requestObserver: ImageRequestObserver? = null
 
     /** 首帧估算用的一次性 OnPreDraw 监听（重绑/回收时移除，防止旧轨迹记到新页面的绘制帧） */
     private var drawListener: ViewTreeObserver.OnPreDrawListener? = null
@@ -108,13 +110,18 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
         imageUrl: String,
         isHorizontal: Boolean,
         isLastImage: Boolean,
-        transformation: Transformation<Bitmap>?
+        transformation: Transformation<Bitmap>?,
+        observer: ImageRequestObserver? = null,
     ) {
+        requestObserver?.cancelled()
+        requestObserver = null
         val book = ReadManga.book
         if (book == null || !book.isImage || imageUrl.isBlank()) {
+            observer?.displayFailed()
             showFail()
             return
         }
+        requestObserver = observer
         //重绑先取消旧绑定任务：其结果已无 UI 归属；一并移除旧的首帧估算监听，
         //避免重绑后旧轨迹把新页面的绘制帧记成自己的 draw 估算
         loadJob?.cancel()
@@ -147,10 +154,13 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
                         onImageData = { imageData = it },
                         onHitFile = { hitFile = it },
                         trace = trace,
+                        observer = observer,
                     )
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
+                    observer?.failure("图片缓存处理", e)
+                    observer?.cached(ImageCacheResult.FAILED)
                     e.printOnDebug()
                     ImageCacheResult.FAILED
                 }
@@ -161,6 +171,7 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
                 }
                 withContext(Dispatchers.Main) {
                     if (!canDeliverToUi(sequence, imageUrl)) {
+                        observer?.cancelled()
                         trace?.cancel("stale")
                         MangaPerfLog.summary(trace)
                         return@withContext
@@ -190,6 +201,7 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
                     }
                 }
             } catch (e: CancellationException) {
+                observer?.cancelled()
                 //取消（重绑/复用回收/页面退出）：与失败严格区分记录
                 trace?.cancel("cancel")
                 MangaPerfLog.summary(trace)
@@ -200,6 +212,8 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
 
     /** 复用/销毁时取消在途加载 */
     fun cancelLoad() {
+        requestObserver?.cancelled()
+        requestObserver = null
         loadSequence++
         removeProgressListener()
         removeDrawListener()
@@ -298,7 +312,10 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
             ): Boolean {
                 logSlowLoad(imageUrl, result, ensureMs, (System.nanoTime() - glideStart) / 1_000_000)
                 emitFail(trace, glideStart, e?.localizedMessage ?: "bytes decode failed")
-                if (canDeliverToUi(sequence, imageUrl)) showFail()
+                if (canDeliverToUi(sequence, imageUrl)) {
+                    requestObserver?.displayFailed(error = e)
+                    showFail()
+                }
                 return true
             }
 
@@ -359,6 +376,7 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
                         trace.fail("glide decode failed")
                     }
                     if (!canDeliverToUi(sequence, imageUrl)) return true
+                    requestObserver?.displayFailed(fallback = true, error = e)
                     //文件通过了统一校验，却在 Glide 这层解不开：删掉，避免下次继续命中
                     file.delete()
                     //不在监听器回调里直接重入 Glide：投递到主队列，执行前重新校验身份与生命周期
@@ -461,6 +479,7 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
         sequence: Int,
         imageUrl: String,
     ) {
+        if (canDeliverToUi(sequence, imageUrl)) requestObserver?.displayed()
         if (trace == null) return
         trace.glideMs = MangaPerfLog.msSince(glideStart)
         MangaPerfLog.summary(trace)
@@ -533,6 +552,7 @@ open class MangaVH<VB : ViewBinding>(val binding: VB, private val context: Conte
     }
 
     private fun showFail() {
+        requestObserver?.displayFailed()
         mFlProgress.isVisible = true
         mLoading.isGone = true
         mRetry?.isVisible = true

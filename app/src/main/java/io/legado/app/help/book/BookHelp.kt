@@ -17,6 +17,7 @@ import io.legado.app.help.MangaPerfLog
 import io.legado.app.help.config.AppConfig
 import io.legado.app.model.ImageBatchStats
 import io.legado.app.model.ImageCacheResult
+import io.legado.app.help.http.ImageRequestObserver
 import io.legado.app.model.ImageFileInfo
 import io.legado.app.model.ImageStore
 import io.legado.app.model.MangaImageContent
@@ -717,8 +718,12 @@ object BookHelp {
         onImageData: ((ByteArray) -> Unit)? = null,
         onHitFile: ((File) -> Unit)? = null,
         trace: MangaPerfLog.Trace? = null,
+        observer: ImageRequestObserver? = null,
     ): ImageCacheResult {
-        if (src.isBlank()) return ImageCacheResult.FAILED
+        if (src.isBlank()) {
+            observer?.cached(ImageCacheResult.FAILED)
+            return ImageCacheResult.FAILED
+        }
         //命中快路径：单次解析即完成校验与文件交接，不必进入互斥入口再校验一遍；
         //未命中才走统一入口（下载/写入语义完全不变）。并发场景不会重复下载：
         //这里只做只读解析，真正的下载仍由 ensure 内的互斥与锁下去重保证。
@@ -727,11 +732,13 @@ object BookHelp {
             getValidatedImageFile(book, src)?.let {
                 if (trace != null) trace.checkMs = MangaPerfLog.msSince(checkStart)
                 onHitFile(it)
+                observer?.cached(ImageCacheResult.HIT)
                 return ImageCacheResult.HIT
             }
             if (trace != null) trace.checkMs = MangaPerfLog.msSince(checkStart)
         }
-        return imageCache(bookSource, book, chapter, trace).ensure(src, onImageData)
+        return imageCache(bookSource, book, chapter, trace, observer).ensure(src, onImageData)
+            .also { observer?.cached(it) }
     }
 
     /**
@@ -855,11 +862,18 @@ object BookHelp {
         book: Book,
         chapter: BookChapter? = null,
         trace: MangaPerfLog.Trace? = null,
+        observer: ImageRequestObserver? = null,
     ) = PersistentImageCache(
         store = BookImageStore(book, trace),
         isValidData = { bytes ->
             val validateStart = if (trace != null) MangaPerfLog.nowNs() else 0L
-            val ok = checkImage(bytes)
+            val ok = try {
+                checkImage(bytes)
+            } catch (e: Exception) {
+                observer?.failure("图片解码/校验", e)
+                throw e
+            }
+            observer?.validated(ok)
             if (trace != null) trace.validateMs = MangaPerfLog.msSince(validateStart)
             ok
         },
@@ -867,14 +881,20 @@ object BookHelp {
             val netStart = if (trace != null) MangaPerfLog.nowNs() else 0L
             val bytes = AnalyzeUrl(
                 src, source = bookSource, coroutineContext = currentCoroutineContext()
-            ).getByteArrayAwait()
+            ).getByteArrayAwait(observer)
             if (trace != null) trace.netMs = MangaPerfLog.msSince(netStart)
             //只处理新网络字节，命中历史缓存不会再次执行书源解密。
             if (book.isImage) {
                 val decryptStart = if (trace != null) MangaPerfLog.nowNs() else 0L
-                val decoded = runScriptWithContext {
-                    ImageUtils.decode(src, bytes, isCover = false, bookSource, book)
+                val decoded = try {
+                    runScriptWithContext {
+                        ImageUtils.decode(src, bytes, isCover = false, bookSource, book)
+                    }
+                } catch (e: Exception) {
+                    observer?.failure("图片解密", e)
+                    throw e
                 }
+                observer?.decrypted(!ImageUtils.skipDecode(bookSource, false), decoded?.size)
                 if (trace != null) trace.decryptMs = MangaPerfLog.msSince(decryptStart)
                 decoded
             } else {
@@ -883,9 +903,11 @@ object BookHelp {
         },
         locks = imageLocks,
         onInvalidData = { src ->
+            observer?.validated(false)
             AppLog.put("${book.name} ${chapter?.title} 图片 $src 数据异常，未写入缓存")
         },
         onFetchFailed = { src, e ->
+            observer?.fetchFailed(e)
             AppLog.put("${book.name} ${chapter?.title} 图片 $src 下载失败\n${e.localizedMessage}", e)
         },
         onOptimizeFailed = { src, e ->

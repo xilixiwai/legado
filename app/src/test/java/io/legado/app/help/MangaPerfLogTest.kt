@@ -325,8 +325,10 @@ class MangaPerfLogTest {
         val vh = source("app/src/main/java/io/legado/app/ui/book/manga/recyclerview/MangaVH.kt")
         val readyBlock = block(vh, "private fun emitReady(", "private fun applyReadyLayout")
         //顺序：触发即摘除自身 → 身份重校验（过期提前返回）→ 才允许记 MangaDraw
+        // 只检查首帧监听内部；方法入口也可在记录响应显示结果前检查绑定身份。
+        val preDrawBlock = readyBlock.substringAfter("override fun onPreDraw()")
         assertOrder(
-            readyBlock,
+            preDrawBlock,
             "removeOnPreDrawListener(this)",
             "canDeliverToUi(sequence, imageUrl)",
             "MangaPerfLog.draw("

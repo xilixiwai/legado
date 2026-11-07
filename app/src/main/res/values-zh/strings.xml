@@ -503,6 +503,7 @@
     <string name="intelligent_import">智能导入</string>
     <string name="discovery">发现</string>
     <string name="explore_debug_response">查看网页返回</string>
+    <string name="manga_response">获取当前返回的源码</string>
     <string name="switch_display_style">切换显示样式</string>
     <string name="import_per">导入本地书籍需要存储权限</string>
     <string name="night_theme">夜间模式</string>

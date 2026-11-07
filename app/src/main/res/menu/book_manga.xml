@@ -31,6 +31,11 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/menu_manga_response"
+        android:title="@string/manga_response"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/menu_pre_manga_number"
         android:title="@string/pre_download"
         app:showAsAction="never" />

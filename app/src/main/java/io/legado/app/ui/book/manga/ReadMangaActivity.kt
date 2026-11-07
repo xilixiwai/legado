@@ -59,6 +59,7 @@ import io.legado.app.ui.book.read.MangaMenu
 import io.legado.app.ui.book.read.ReadBookActivity.Companion.RESULT_DELETED
 import io.legado.app.ui.book.toc.TocActivityResult
 import io.legado.app.ui.widget.number.NumberPickerDialog
+import io.legado.app.ui.widget.dialog.TextDialog
 import io.legado.app.ui.widget.recycler.LoadMoreView
 import io.legado.app.utils.GSON
 import io.legado.app.utils.NetworkUtils
@@ -91,8 +92,9 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
     private val mLayoutManager by lazy {
         MangaLayoutManager(this)
     }
+    private val imageDiagnostics = MangaPageDiagnostics()
     private val mAdapter: MangaAdapter by lazy {
-        MangaAdapter(this)
+        MangaAdapter(this, imageDiagnostics)
     }
 
     private val mSizeProvider by lazy {
@@ -271,6 +273,7 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
     }
 
     override fun onNewIntent(intent: Intent) {
+        imageDiagnostics.clear()
         super.onNewIntent(intent)
         viewModel.initData(intent)
     }
@@ -439,6 +442,7 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
     }
 
     override fun onDestroy() {
+        imageDiagnostics.close()
         ReadManga.unregister(this)
         super.onDestroy()
     }
@@ -488,6 +492,7 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
 
     override fun changeTo(source: BookSource, book: Book, toc: List<BookChapter>) {
         if (book.isImage) {
+            imageDiagnostics.clear()
             binding.flLoading.isVisible = true
             viewModel.changeTo(book, toc)
         } else {
@@ -527,6 +532,7 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
             }
 
             R.id.menu_refresh -> {
+                imageDiagnostics.clear()
                 binding.flLoading.isVisible = true
                 ReadManga.book?.let {
                     viewModel.refreshContentDur(it)
@@ -534,6 +540,14 @@ class ReadMangaActivity : VMBaseActivity<ActivityMangaBinding, ReadMangaViewMode
             }
 
             R.id.menu_download_all -> downloadWholeManga()
+
+            R.id.menu_manga_response -> {
+                val text = mAdapter.responseText(binding.recyclerView.findCenterViewPosition())
+                showDialogFragment(TextDialog(
+                    getString(R.string.manga_response), text, copyable = true,
+                    maxDisplayChars = text.length + 1
+                ))
+            }
 
             R.id.menu_pre_manga_number -> {
                 showNumberPickerDialog(
